@@ -40,6 +40,16 @@
       <div id="drive-result"></div>
     </section>
 
+    <section class="card" id="lib-card">
+      <h2>3. Thư viện (quét và nhận diện)</h2>
+      <div class="row">
+        <button id="btn-scan" disabled>Quét Drive</button>
+        <button id="btn-export" class="secondary">Xuất kết quả (TSV)</button>
+      </div>
+      <p class="hint">Quét toàn bộ thư mục CAMBRIDGE, tự nhận Quyển / Test / Part. Bấm vào từng quyển để xem và sửa. Chỗ sửa được nhớ trong máy này.</p>
+      <div id="lib-result"></div>
+    </section>
+
     <section class="card">
       <h2>Nhật ký</h2>
       <p class="hint">Gửi phần này cho Claude khi có lỗi. Không chứa token.</p>
@@ -53,6 +63,8 @@
 
   <script src="config.js"></script>
   <script src="app.js"></script>
+  <script src="recognize.js"></script>
+  <script src="library.js"></script>
   <script src="https://accounts.google.com/gsi/client" async onload="onGisLoaded()" onerror="log('Không tải được thư viện đăng nhập Google (mạng hoặc trình chặn quảng cáo).')"></script>
 </body>
 </html>

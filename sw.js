@@ -1,8 +1,8 @@
 // Service worker: chỉ lưu vỏ app (HTML, CSS, JS, icon) để mở nhanh và cài được.
 // Không đụng tới request gửi Google/Drive.
-const VERSION = 'm1-2';
+const VERSION = 'm2-1';
 const SHELL = [
-  './', 'index.html', 'style.css', 'app.js', 'config.js', 'manifest.webmanifest',
+  './', 'index.html', 'style.css', 'app.js', 'config.js', 'recognize.js', 'library.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-512-maskable.png', 'icons/apple-touch-icon.png',
 ];
 

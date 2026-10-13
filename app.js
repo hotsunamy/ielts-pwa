@@ -44,9 +44,12 @@ function grantedAll(scopeStr) {
   const got = new Set(String(scopeStr || '').split(/\s+/));
   return CFG.SCOPES.filter((s) => !got.has(s));
 }
+const tokenWaiters = [];
 function acceptToken({ access_token, expires_in, scope }, via) {
   const missing = grantedAll(scope);
-  saveAuth({ token: access_token, expiresAt: Date.now() + Number(expires_in) * 1000, scope, via, at: Date.now() });
+  const prev = loadAuth();
+  saveAuth({ token: access_token, expiresAt: Date.now() + Number(expires_in) * 1000, scope, via, at: Date.now(), email: prev && prev.email });
+  while (tokenWaiters.length) tokenWaiters.shift()(true);
   log(`Nhận token qua ${via}, hạn ${Math.round(expires_in / 60)} phút.` +
       (missing.length ? ` THIẾU quyền: ${missing.map(shortScope).join(', ')}` : ' Đủ quyền.'));
 }
@@ -80,6 +83,22 @@ function loginPopup(silent) {
   tokenClient.requestAccessToken({ prompt: silent ? '' : 'select_account' , login_hint: a && a.email || undefined });
   log(silent ? 'Đang thử gia hạn token (cửa sổ, không hỏi lại nếu được).' : 'Mở cửa sổ đăng nhập.');
 }
+
+// Gọi ngay đầu một thao tác bấm (trước mọi await) để trình duyệt cho phép mở cửa sổ gia hạn.
+// Token còn hạn thì trả về ngay; sắp hết hoặc hết thì gia hạn rồi mới chạy tiếp (đã chốt 14/10).
+function ensureToken() {
+  const a = loadAuth();
+  if (a && a.token && a.expiresAt > Date.now() + 5 * 60_000) return Promise.resolve(true);
+  if (!a) return Promise.reject(new AuthError('Chưa đăng nhập'));
+  if (!tokenClient) return Promise.reject(new AuthError('Token hết hạn, hãy đăng nhập lại'));
+  const p = new Promise((resolve, reject) => {
+    tokenWaiters.push(resolve);
+    setTimeout(() => reject(new AuthError('Gia hạn token quá 60 giây chưa xong')), 60_000);
+  });
+  loginPopup(true);
+  return p;
+}
+window.ensureToken = ensureToken;
 
 // ---------- Đăng nhập kiểu chuyển trang (OAuth implicit flow) ----------
 function redirectUri() { return location.origin + location.pathname; }
@@ -235,6 +254,7 @@ function renderAuth() {
   $('btn-refresh').disabled = !a;
   $('btn-expire').disabled = !ok;
   $('btn-logout').disabled = !a;
+  if (window.Library) window.Library.onAuth(!!a);
   clearTimeout(countdown);
   if (a) countdown = setTimeout(renderAuth, 30_000);
 }

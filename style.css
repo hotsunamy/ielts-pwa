@@ -58,3 +58,37 @@ pre#log {
   padding: 8px; font-size: 12px; max-height: 280px; overflow: auto;
   white-space: pre-wrap; word-break: break-word; margin: 8px 0 0;
 }
+
+/* Mốc 2: thư viện */
+button.small { font-size: 13px; min-height: 32px; padding: 4px 10px; }
+.books { display: grid; gap: 6px; margin-top: 8px; }
+details { border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: var(--card); }
+details > summary { cursor: pointer; line-height: 1.9; }
+details[open] > summary { margin-bottom: 6px; }
+.chip { display: inline-block; font-size: 12px; border: 1px solid var(--line); border-radius: 99px; padding: 0 8px; margin: 1px 2px; color: var(--muted); }
+.chip.ok { color: var(--ok); border-color: currentColor; }
+.chip.warn { color: var(--warn); border-color: currentColor; }
+.chip.bad { color: var(--bad); border-color: currentColor; }
+.frow { display: grid; grid-template-columns: 1fr auto auto auto; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.frow .fname { word-break: break-word; }
+.frow .fname .hint { display: block; }
+.frow .note { color: var(--warn); }
+.frow .fasg { font-size: 14px; white-space: nowrap; }
+.frow.editing { grid-template-columns: 1fr; background: var(--bg); padding: 8px; border-radius: 8px; }
+.edit-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+.edit-grid input, .edit-grid select, .kwrow input, .book-ctl input[type=number] { font: inherit; font-size: 15px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+.edit-grid input { width: 5em; }
+.badge { font-size: 12px; border-radius: 6px; padding: 1px 6px; white-space: nowrap; border: 1px solid currentColor; }
+.c-high, .c-manual, .c-confirmed { color: var(--ok); }
+.c-medium, .c-low { color: var(--warn); }
+.c-unassigned { color: var(--bad); }
+.c-ignored { color: var(--muted); }
+.book-ctl { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 4px 0; font-size: 14px; }
+.book-ctl .radio { display: block; width: 100%; }
+.kwrow { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+.kwrow input { flex: 1; }
+@media (max-width: 560px) {
+  .frow { grid-template-columns: 1fr auto auto; row-gap: 2px; }
+  .frow .fname { grid-column: 1 / -1; }
+  .frow .fasg { white-space: normal; }
+}
