@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Luyện IELTS</title>
+  <meta name="theme-color" content="#1f3a5f">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Luyện IELTS">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Luyện IELTS</h1>
+    <span id="mode" class="tag"></span>
+  </header>
+
+  <main>
+    <section class="card" id="auth-card">
+      <h2>1. Đăng nhập</h2>
+      <p id="auth-status">Chưa đăng nhập.</p>
+      <div class="row">
+        <button id="btn-login">Đăng nhập Google</button>
+        <button id="btn-login-redirect" class="secondary">Đăng nhập kiểu chuyển trang</button>
+      </div>
+      <div class="row">
+        <button id="btn-refresh" class="secondary" disabled>Thử gia hạn token</button>
+        <button id="btn-expire" class="secondary" disabled>Giả lập token hết hạn</button>
+        <button id="btn-logout" class="secondary" disabled>Đăng xuất</button>
+      </div>
+      <p class="hint">Nếu nút đầu không mở được cửa sổ đăng nhập (hay gặp khi app đã cài lên màn hình chính trên iPhone/iPad), dùng nút thứ hai.</p>
+    </section>
+
+    <section class="card" id="drive-card">
+      <h2>2. Kiểm tra Drive</h2>
+      <button id="btn-check" disabled>Kiểm tra</button>
+      <div id="drive-result"></div>
+    </section>
+
+    <section class="card">
+      <h2>Nhật ký</h2>
+      <p class="hint">Gửi phần này cho Claude khi có lỗi. Không chứa token.</p>
+      <div class="row">
+        <button id="btn-copy-log" class="secondary">Chép nhật ký</button>
+        <button id="btn-clear-log" class="secondary">Xóa</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async onload="onGisLoaded()" onerror="log('Không tải được thư viện đăng nhập Google (mạng hoặc trình chặn quảng cáo).')"></script>
+</body>
+</html>
