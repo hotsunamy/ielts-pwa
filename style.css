@@ -73,6 +73,7 @@ details[open] > summary { margin-bottom: 6px; }
 .frow .fname { word-break: break-word; }
 .frow .fname .hint { display: block; }
 .frow .note { color: var(--warn); }
+.frow .note.done { color: var(--muted); }
 .frow .fasg { font-size: 14px; white-space: nowrap; }
 .frow.editing { grid-template-columns: 1fr; background: var(--bg); padding: 8px; border-radius: 8px; }
 .edit-grid { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -91,4 +92,58 @@ details[open] > summary { margin-bottom: 6px; }
   .frow { grid-template-columns: 1fr auto auto; row-gap: 2px; }
   .frow .fname { grid-column: 1 / -1; }
   .frow .fasg { white-space: normal; }
+}
+
+/* Mốc 3: thẻ Đề và trình xem PDF */
+#exam-card label { display: inline-flex; gap: 6px; align-items: center; }
+#exam-card label.grow { flex: 1; min-width: 0; }
+#exam-card select, .vbar select, .vpanel select, .vpanel input, .vnav input {
+  font: inherit; font-size: 15px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); max-width: 100%;
+}
+#exam-card label.grow select { width: 100%; }
+pre.probe { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font-size: 12px; white-space: pre-wrap; word-break: break-word; margin: 8px 0 0; }
+pre.probe:empty { display: none; }
+.frow .btns { white-space: nowrap; }
+
+body.viewing { overflow: hidden; }
+.viewer {
+  position: fixed; inset: 0; z-index: 50; background: var(--bg); display: flex; flex-direction: column;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+.viewer[hidden] { display: none; }
+.vbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--line); background: var(--card); }
+.vtitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vnav { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.vnav input { width: 3.5em; text-align: center; }
+.vtools .tool.on { background: var(--accent); color: var(--accent-ink); }
+.vtools .tool { background: transparent; color: var(--accent); }
+.vbanner { padding: 8px 12px; background: var(--card); border-bottom: 1px solid var(--line); font-size: 14px; }
+.vpanel { max-height: 45vh; overflow: auto; padding: 8px 12px; background: var(--card); border-bottom: 1px solid var(--line); font-size: 14px; }
+.vpanel[hidden] { display: none; }
+.mtable { border-collapse: collapse; width: 100%; margin-top: 6px; }
+.mtable th, .mtable td { text-align: left; border-top: 1px solid var(--line); padding: 4px 6px; vertical-align: middle; }
+.mtable td:last-child { white-space: nowrap; text-align: right; }
+.vdetect { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 6px 0; background: var(--bg); }
+.vscroll { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; padding: 8px; }
+.vbox { position: relative; margin: 0 auto; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.vbox canvas { display: block; }
+.vink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.vink.active { pointer-events: auto; touch-action: none; cursor: crosshair; }
+.vink polyline { fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.vink .ink-hl { stroke: #ffd400; stroke-opacity: .42; stroke-width: 16; }
+.vink .ink-ul { stroke: #d0021b; stroke-width: 2.4; }
+.vstatus { font-size: 12px; color: var(--muted); padding: 4px 8px; border-top: 1px solid var(--line); background: var(--card); }
+@media (max-width: 560px) {
+  /* Điện thoại: mỗi thanh một dòng, dài thì vuốt ngang, để dành chỗ cho trang đề. */
+  .vbar { gap: 4px; padding: 4px 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .vbar::-webkit-scrollbar { display: none; }
+  .vbar > * { flex-shrink: 0; }
+  .vbar .vtitle { flex-shrink: 1; font-size: 14px; }
+  .vbar button.small { padding: 2px 9px; min-height: 30px; font-size: 13px; }
+  .vnav { flex-wrap: nowrap; white-space: nowrap; font-size: 14px; }
+  .vnav .lbl { display: none; }
+  .vbar select { font-size: 14px; padding: 2px 4px; max-width: 46vw; }
+  .vstatus { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vstatus.full { white-space: normal; }
+  .vscroll { padding: 4px; }
 }

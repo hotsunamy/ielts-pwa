@@ -1,4 +1,4 @@
-// Mốc 2: quét thư mục CAMBRIDGE trên Drive, nhận diện file, bảng xác nhận và sửa tay.
+// Mốc 2 (+ mốc 3: nút Mở PDF): quét thư mục CAMBRIDGE trên Drive, nhận diện file, bảng xác nhận và sửa tay.
 // Kết quả quét và chỗ sửa tay lưu trong máy (localStorage). Mốc 6 chuyển chỗ sửa tay sang Drive.
 'use strict';
 (function () {
@@ -80,21 +80,8 @@
     const c = getCfg();
     results = Recognize.recognizeAll(scan.files, { maxBook: MAX_BOOK, books: c.books, keywords: c.keywords });
     const byId = new Map(scan.files.map((f) => [f.id, f]));
-    for (const r of results) {
-      r.path = (byId.get(r.id) || {}).path || [];
-      r.auto = { book: r.book, test: r.test, part: r.part, scope: r.scope, conf: r.conf };
-      const ov = c.files[r.id];
-      if (ov) {
-        if (ov.ignored) r.ignored = true;
-        else { Object.assign(r, { book: ov.book, test: ov.test, part: ov.part, scope: ov.scope }); r.conf = 'manual'; }
-      }
-      const bc = c.books[r.book] || {};
-      if (bc.confirmed && r.scope === 'track' && r.conf === 'low') {
-        r.conf = 'confirmed';
-        r.notes = r.notes.map((n) => n.replace('chưa nghe kiểm chứng', 'Minh đã xác nhận cả quyển'));
-      }
-      if (r.kind === 'pdf' && r.multiBook && bc.mainPdf) r.isMain = bc.mainPdf === r.id;
-    }
+    for (const r of results) r.path = (byId.get(r.id) || {}).path || [];
+    Recognize.applyOverrides(results, c);   // sửa tay + đổi ghi chú tự động theo (rule 14/10)
     return scan;
   }
 
@@ -121,10 +108,10 @@
     if (editing === r.id) return editRow(r);
     const notes = (r.notes || []).filter(Boolean);
     return `<div class="frow">
-      <div class="fname">${esc(r.name)}<span class="hint">${esc(folder)}</span>${notes.length ? `<span class="hint note">${esc(notes.join('; '))}</span>` : ''}</div>
+      <div class="fname">${esc(r.name)}<span class="hint">${esc(folder)}</span>${notes.length ? `<span class="hint note${r.ignored || r.conf === 'manual' || r.conf === 'confirmed' || r.isMain !== undefined ? ' done' : ''}">${esc(notes.join('; '))}</span>` : ''}</div>
       <div class="fasg">${esc(assignLabel(r))}${r.isMain ? ' <b>(bản chính)</b>' : ''}</div>
       <span class="badge c-${conf}">${esc(r.ignored ? 'bỏ qua' : CONF_LABEL[conf] || conf)}</span>
-      <button class="small secondary" data-act="edit" data-id="${esc(r.id)}">Sửa</button>
+      <span class="btns">${r.kind === 'pdf' && !r.ignored ? `<button class="small" data-act="open" data-id="${esc(r.id)}">Mở</button> ` : ''}<button class="small secondary" data-act="edit" data-id="${esc(r.id)}">Sửa</button></span>
     </div>`;
   }
 
@@ -230,6 +217,7 @@
         <div class="row"><button class="small" data-act="kwsave">Lưu từ khóa</button>
         <button class="small secondary" data-act="clearall">Xóa mọi chỗ sửa tay</button></div>
       </details>`;
+    if (window.Viewer) Viewer.refreshPicker();
     log(`Nhận diện: ${audio.length} audio (${count(audio)}), ${pdf.length} PDF (${count(pdf)}). Đủ ô ${chk.full.length} quyển; thiếu: ${chk.partial.map((b) => `${b.book} ${b.filled}/${b.expected}`).join(', ') || 'không'}; không audio: ${chk.none.join(', ') || 'không'}.`);
   }
 
@@ -245,6 +233,7 @@
     if (!btn) return;
     const act = btn.dataset.act, id = btn.dataset.id;
     const r = results.find((x) => x.id === id);
+    if (act === 'open') { if (window.Viewer) Viewer.open({ file: r, mode: 'review' }); return; }
     if (act === 'edit') { editing = id; render(); return; }
     if (act === 'cancel') { editing = null; render(); return; }
     if (act === 'save') {
@@ -333,6 +322,7 @@
   function onAuth(signedIn) {
     const b = $('btn-scan');
     if (b) b.disabled = !signedIn;
+    if (window.Viewer) Viewer.refreshPicker();
   }
 
   function init() {

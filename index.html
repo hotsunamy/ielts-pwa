@@ -50,6 +50,30 @@
       <div id="lib-result"></div>
     </section>
 
+    <section class="card" id="exam-card">
+      <h2>4. Đề</h2>
+      <div class="row">
+        <label>Quyển <select id="ex-book"></select></label>
+        <label class="grow">PDF <select id="ex-pdf"></select></label>
+      </div>
+      <div class="row">
+        <button id="ex-review" disabled>Mở ôn tập</button>
+        <label>Phần <select id="ex-seg"></select></label>
+        <button id="ex-exam" disabled>Làm đề phần này</button>
+      </div>
+      <p class="hint" id="ex-hint"></p>
+      <details class="tech">
+        <summary>Kiểm tra kỹ thuật</summary>
+        <div class="row">
+          <button id="ex-probe" class="small secondary" disabled>Thử lấy từng đoạn PDF (Range)</button>
+          <button id="ex-cache-btn" class="small secondary">Xem cache PDF</button>
+          <button id="ex-cache-clear" class="small secondary">Xóa cache PDF</button>
+        </div>
+        <p class="hint" id="ex-cache"></p>
+        <pre id="ex-probe-out" class="probe"></pre>
+      </details>
+    </section>
+
     <section class="card">
       <h2>Nhật ký</h2>
       <p class="hint">Gửi phần này cho Claude khi có lỗi. Không chứa token.</p>
@@ -65,6 +89,9 @@
   <script src="app.js"></script>
   <script src="recognize.js"></script>
   <script src="library.js"></script>
+  <script src="sections.js"></script>
+  <script src="pdfsource.js"></script>
+  <script src="viewer.js"></script>
   <script src="https://accounts.google.com/gsi/client" async onload="onGisLoaded()" onerror="log('Không tải được thư viện đăng nhập Google (mạng hoặc trình chặn quảng cáo).')"></script>
 </body>
 </html>

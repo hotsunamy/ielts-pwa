@@ -291,11 +291,52 @@
     return books;
   }
 
+  // Áp chỗ Minh sửa tay lên kết quả tự động (hàm thuần, test được bằng Node).
+  // Rule 14/10: khi Minh đã sửa tay hoặc xác nhận, ghi chú tự động kiểu "cần xác nhận", "cần chọn",
+  // "chưa kiểm chứng" phải đổi theo, không để lại ghi chú cũ.
+  // cfg: {files: {[id]: {book,test,part,scope} | {ignored:true}}, books: {[book]: {confirmed, mainPdf}}}
+  const CONF_VI = { high: 'chắc', medium: 'vừa', low: 'thấp', unassigned: 'chưa gán' };
+  function autoSummary(r) {
+    const a = r.auto;
+    const pos = a.book ? `Cam ${a.book}` : 'chưa có quyển';
+    const tp = a.test != null ? ` T${a.test}${a.part != null ? ' P' + a.part : ''}` : '';
+    const notes = (r.notes || []).filter(Boolean);
+    return `tự động: ${pos}${tp}, ${a.scope || '?'}, mức ${CONF_VI[a.conf] || a.conf}${notes.length ? `; "${notes.join('; ')}"` : ''}`;
+  }
+  function applyOverrides(results, cfg = {}) {
+    const files = cfg.files || {}, books = cfg.books || {};
+    for (const r of results) {
+      r.auto = { book: r.book, test: r.test, part: r.part, scope: r.scope, conf: r.conf };
+      const ov = files[r.id];
+      if (ov && ov.ignored) {
+        r.ignored = true;
+        r.notes = [`đã bỏ qua (${autoSummary(r)})`];
+        continue;
+      }
+      if (ov) {
+        r.notes = [`đã sửa tay (${autoSummary(r)})`];
+        Object.assign(r, { book: ov.book, test: ov.test, part: ov.part, scope: ov.scope });
+        r.conf = 'manual';
+      }
+      const bc = books[r.book] || {};
+      if (bc.confirmed && r.scope === 'track' && r.conf === 'low') {
+        r.conf = 'confirmed';
+        r.notes = r.notes.map((n) => n.replace('chưa nghe kiểm chứng', 'Minh đã xác nhận cả quyển'));
+      }
+      if (r.kind === 'pdf' && r.multiBook && bc.mainPdf) {
+        r.isMain = bc.mainPdf === r.id;
+        r.notes = r.notes.filter((n) => n !== 'quyển có >1 PDF sách, cần chọn');
+        r.notes.push(r.isMain ? 'PDF chính (Minh đã chọn)' : 'PDF phụ (Minh đã chọn bản khác làm chính)');
+      }
+    }
+    return results;
+  }
+
   function groupBy(arr, fn) {
     const m = new Map();
     for (const x of arr) { const k = fn(x); if (!m.has(k)) m.set(k, []); m.get(k).push(x); }
     return m;
   }
 
-  return { tokenize, splitExt, recognizeAll, audioCells, DEFAULT_KW, AUDIO_EXT };
+  return { tokenize, splitExt, recognizeAll, audioCells, applyOverrides, DEFAULT_KW, AUDIO_EXT };
 });
