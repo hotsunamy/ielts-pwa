@@ -111,8 +111,10 @@
     // Trang sẽ hiện đầu tiên (để tải trước đúng trang đó trong lúc pdf.js mở tài liệu).
     const c0 = pcfg(opts.file.id);
     const startPage = st.mode === 'exam' ? (c0.marks[st.segKey] || 1) : (c0.lastPage || 1);
+    let tokenMs = 0;
     try {
       await wait;
+      tokenMs = Math.round(performance.now() - t0);   // m3-4: thời gian chờ gia hạn token, ghi riêng ở dòng Mốc
       st.src = await PdfSource.openDocument(opts.file, {
         startPage,
         onStats: status,
@@ -146,7 +148,7 @@
     const src = st.src;
     await render();
     if (st.src !== src) return;
-    src.report(`Mở xong, thấy trang ${st.page} sau ${Math.round(performance.now() - t0)} ms`, { seen: true, renderMs: st.lastRender ? st.lastRender.ms : null });
+    src.report(`Mở xong, thấy trang ${st.page} sau ${Math.round(performance.now() - t0)} ms kể từ lúc bấm`, { seen: true, renderMs: st.lastRender ? st.lastRender.ms : null, tokenMs });
     backgroundPrefetch(src);
   }
 

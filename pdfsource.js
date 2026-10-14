@@ -1,4 +1,5 @@
 // Mốc 3: lấy PDF từ Drive của Minh theo từng đoạn byte (header Range), có cache đoạn trong máy.
+// Bản m3-4: tự thử lại khi Drive lỗi tạm thời (5xx/429); dòng Mốc tách chờ Drive / vẽ, ghi chờ token; bỏ qua lần ẩn tab < 50 ms.
 // Bản m3-3: đuôi file 256 KB, nhật ký tóm tắt theo đợt + thời gian vẽ trang đầu + tab bị ẩn, nút "Chuẩn bị quyển này".
 // Bản m3-2: ghi lại từng lần gọi Drive; tự đọc cấu trúc PDF (pdfindex.js, kể cả xref nén) để tải trước song song
 // những gì pdf.js sẽ cần, thay vì để pdf.js tự hỏi từng chỗ một, mỗi chỗ một lần chờ mạng.
@@ -25,6 +26,7 @@
   const LANES = 256;
   const GAP = 2;                  // hai dải cách nhau tới 2 đoạn (32 KB) thì gộp chung một lần gọi
   const MEM_CAP = 48e6;           // giữ tối đa chừng này byte đoạn trong bộ nhớ (ngoài Cache API) để đọc lại nhanh
+  const HIDE_MIN = 50;            // m3-4: lần tab/app bị ẩn ngắn hơn chừng này ms thì không tính (hộp hỏi iOS)
 
   class AuthNeeded extends Error {}
   class NoRange extends Error {}
@@ -47,21 +49,36 @@
 
   // Xin byte [begin, end) của file. Drive trả 206 nếu hỗ trợ Range. Trả 200 thì dừng ngay để khỏi tải cả file.
   // rec (nếu có) nhận thời điểm có header và lúc xong, để ghi nhật ký từng lần gọi.
+  // m3-4: Drive lỗi tạm thời (500/502/503/504, 429 quá nhiều yêu cầu) thì tự thử lại tối đa 3 lần, chờ khoảng 0,5 / 1 / 2 s
+  // (±20% để các lần gọi cùng lúc không thử lại dồn một lượt). Nhật ký iPhone 14/10: "Chuẩn bị 12.pdf lỗi: Drive trả 500" làm hỏng
+  // cả lượt khoảng 145 lần gọi. 401 (token hết hạn) và 200 (Drive không cho lấy từng đoạn) vẫn xử lý như cũ, không thử lại.
+  // rec.retries = số lần đã thử lại, rec.codes = các mã lỗi đã gặp (để ghi nhật ký).
+  const RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+  const RETRY_WAIT = [500, 1000, 2000];
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   async function fetchRange(id, begin, end, rec) {
-    const t = token();
-    if (!t) throw new AuthNeeded('Chưa đăng nhập');
-    const ctl = new AbortController();
     const t0 = performance.now();
-    const res = await fetch(mediaUrl(id), {
-      headers: { Authorization: 'Bearer ' + t, Range: `bytes=${begin}-${end - 1}` },
-      signal: ctl.signal, cache: 'no-store',
-    });
-    if (rec) { rec.hdr = performance.now(); rec.status = res.status; }
-    if (res.status === 401) { ctl.abort(); const a = loadAuth(); if (a) { a.expiresAt = 0; saveAuth(a); } throw new AuthNeeded('Token hết hạn (401)'); }
-    if (res.status === 200) { ctl.abort(); throw new NoRange('Drive trả 200 (cả file) thay vì 206, không lấy riêng từng đoạn được'); }
-    if (res.status !== 206) { ctl.abort(); throw new Error(`Drive trả ${res.status}`); }
-    const buf = new Uint8Array(await res.arrayBuffer());
-    return { buf, ms: Math.round(performance.now() - t0), headers: res.headers };
+    for (let k = 0; ; k++) {
+      const t = token();
+      if (!t) throw new AuthNeeded('Chưa đăng nhập');
+      const ctl = new AbortController();
+      const res = await fetch(mediaUrl(id), {
+        headers: { Authorization: 'Bearer ' + t, Range: `bytes=${begin}-${end - 1}` },
+        signal: ctl.signal, cache: 'no-store',
+      });
+      if (rec) { rec.hdr = performance.now(); rec.status = res.status; }
+      if (res.status === 401) { ctl.abort(); const a = loadAuth(); if (a) { a.expiresAt = 0; saveAuth(a); } throw new AuthNeeded('Token hết hạn (401)'); }
+      if (res.status === 200) { ctl.abort(); throw new NoRange('Drive trả 200 (cả file) thay vì 206, không lấy riêng từng đoạn được'); }
+      if (RETRY_STATUS.has(res.status) && k < RETRY_WAIT.length) {
+        ctl.abort();
+        if (rec) { rec.retries = k + 1; (rec.codes || (rec.codes = [])).push(res.status); }
+        await sleep(RETRY_WAIT[k] * (0.8 + Math.random() * 0.4));
+        continue;
+      }
+      if (res.status !== 206) { ctl.abort(); throw new Error(`Drive trả ${res.status}${k ? ` (đã thử lại ${k} lần)` : ''}`); }
+      const buf = new Uint8Array(await res.arrayBuffer());
+      return { buf, ms: Math.round(performance.now() - t0), headers: res.headers };
+    }
   }
 
   // ---------- Cache đoạn (Cache API) ----------
@@ -99,7 +116,11 @@
     const span = Math.max(...sorted.map((c) => c.end ?? c.start)) - sorted[0].start;
     const waits = sorted.filter((c) => c.hdr != null).map((c) => c.hdr - c.start);
     const avgWait = waits.length ? Math.round(waits.reduce((s, x) => s + x, 0) / waits.length) : 0;
-    const lines = [`${title}: ${calls.length} lần gọi Drive, ${kb(bytes)} KB, ${wave} đợt nối tiếp, chờ header trung bình ${avgWait} ms.`];
+    const retried = calls.filter((c) => c.retries);
+    const retryTxt = retried.length
+      ? ` Drive lỗi tạm thời, đã tự thử lại: ${retried.length} lần gọi, tổng ${retried.reduce((s, c) => s + c.retries, 0)} lần thử lại (mã ${[...new Set(retried.flatMap((c) => c.codes || []))].join(', ')}).`
+      : '';
+    const lines = [`${title}: ${calls.length} lần gọi Drive, ${kb(bytes)} KB, ${wave} đợt nối tiếp, chờ header trung bình ${avgWait} ms.${retryTxt}`];
     // Tóm tắt theo đợt
     lines.push(' đợt  lần gọi      KB  bắt đầu    xong  chờ header nhỏ/tb/lớn (ms)  lý do');
     for (let w = 1; w <= wave; w++) {
@@ -113,12 +134,14 @@
       const t1 = Math.round(Math.max(...g.map((c) => c.end ?? c.start)));
       const wt = ws.length ? `${Math.min(...ws)}/${Math.round(ws.reduce((s, x) => s + x, 0) / ws.length)}/${Math.max(...ws)}` : '-';
       const err = g.filter((c) => c.err || (c.status && c.status !== 206)).length;
-      lines.push(`${String(w).padStart(4)} ${String(g.length).padStart(8)} ${kbw.padStart(7)} ${String(t0).padStart(8)} ${String(t1).padStart(7)}  ${wt.padStart(26)}  ${whyTxt}${err ? ` (${err} lần lỗi)` : ''}`);
+      const rt = g.filter((c) => c.retries).length;
+      lines.push(`${String(w).padStart(4)} ${String(g.length).padStart(8)} ${kbw.padStart(7)} ${String(t0).padStart(8)} ${String(t1).padStart(7)}  ${wt.padStart(26)}  ${whyTxt}${err ? ` (${err} lần lỗi)` : ''}${rt ? ` (${rt} lần phải thử lại)` : ''}`);
     }
     // Chi tiết: 10 lần gọi đầu + 10 lần gọi chậm nhất (theo thời gian từ bắt đầu tới xong)
     const dur = (c) => (c.end != null ? c.end - c.start : Infinity);
     const pick = new Set(sorted.slice(0, SHOW_FIRST));
     [...sorted].sort((a, b) => dur(b) - dur(a)).slice(0, SHOW_SLOW).forEach((c) => pick.add(c));
+    sorted.filter((c) => c.retries || c.err).slice(0, SHOW_SLOW).forEach((c) => pick.add(c));   // m3-4: luôn hiện lần gọi phải thử lại hoặc lỗi
     lines.push(`  Chi tiết${sorted.length > pick.size ? ` (${SHOW_FIRST} lần gọi đầu + ${SHOW_SLOW} lần chậm nhất, bỏ ${sorted.length - pick.size} lần khác)` : ''}:`);
     lines.push('    #  đợt  lý do                 offset      KB   bắt đầu  có header  xong     ms   song song');
     let prev = -1;
@@ -127,7 +150,7 @@
       if (prev >= 0 && k !== prev + 1) lines.push('    …');
       prev = k;
       const ms = c.end != null ? Math.round(c.end - c.start) : '-';
-      lines.push(`  ${String(k + 1).padStart(3)} ${String(c.wave).padStart(3)}  ${c.why.padEnd(20).slice(0, 20)} ${String(c.off).padStart(10)} ${kb(c.len).padStart(6)} ${String(Math.round(c.start)).padStart(8)} ${c.hdr != null ? String(Math.round(c.hdr)).padStart(9) : '        -'} ${c.end != null ? String(Math.round(c.end)).padStart(6) : '     -'} ${String(ms).padStart(6)}   ${c.par ? 'có (' + c.par + ')' : 'nối tiếp'}${c.status && c.status !== 206 ? ' mã ' + c.status : ''}${c.err ? ' lỗi: ' + c.err : ''}`);
+      lines.push(`  ${String(k + 1).padStart(3)} ${String(c.wave).padStart(3)}  ${c.why.padEnd(20).slice(0, 20)} ${String(c.off).padStart(10)} ${kb(c.len).padStart(6)} ${String(Math.round(c.start)).padStart(8)} ${c.hdr != null ? String(Math.round(c.hdr)).padStart(9) : '        -'} ${c.end != null ? String(Math.round(c.end)).padStart(6) : '     -'} ${String(ms).padStart(6)}   ${c.par ? 'có (' + c.par + ')' : 'nối tiếp'}${c.status && c.status !== 206 ? ' mã ' + c.status : ''}${c.retries ? ` thử lại ${c.retries} (mã ${c.codes.join(',')})` : ''}${c.err ? ' lỗi: ' + c.err : ''}`);
     }
     lines.push(`  (khoảng thời gian từ lần gọi đầu tới lần cuối xong: ${Math.round(span)} ms)`);
     return lines;
@@ -147,11 +170,15 @@
     if (isHidden()) { t.since = 0; t.count = 1; }
     document.addEventListener('visibilitychange', on);
     t.stop = () => document.removeEventListener('visibilitychange', on);
+    // m3-4: bỏ qua lần ẩn dưới HIDE_MIN ms (iPhone 14/10: hộp hỏi của iOS gây 1 lần "ẩn" 2 ms, không phải chuyển app thật).
     t.summary = (upTo) => {
-      const ps = t.periods.map((p) => p.slice()).concat(t.since != null ? [[t.since, upTo ?? now()]] : []);
+      const all = t.periods.map((p) => p.slice()).concat(t.since != null ? [[t.since, upTo ?? now()]] : []);
+      const ps = all.filter((p) => p[1] - p[0] >= HIDE_MIN);
+      const skip = all.length - ps.length;
+      const skipTxt = skip ? ` (bỏ qua ${skip} lần ẩn dưới ${HIDE_MIN} ms, thường do hộp hỏi)` : '';
       const total = ps.reduce((s, p) => s + p[1] - p[0], 0);
-      if (!ps.length) return 'Tab/app không bị ẩn trong lúc này.';
-      return `Tab/app bị ẩn ${ps.length} lần, tổng ${Math.round(total)} ms (${ps.slice(0, 5).map((p) => `${Math.round(p[0])}–${Math.round(p[1])}`).join(', ')}${ps.length > 5 ? ', …' : ''} ms).`;
+      if (!ps.length) return `Tab/app không bị ẩn trong lúc này.${skipTxt}`;
+      return `Tab/app bị ẩn ${ps.length} lần, tổng ${Math.round(total)} ms (${ps.slice(0, 5).map((p) => `${Math.round(p[0])}–${Math.round(p[1])}`).join(', ')}${ps.length > 5 ? ', …' : ''} ms).${skipTxt}`;
     };
     return t;
   }
@@ -210,6 +237,7 @@
         fetchRange(file.id, begin, end, tm).then((r) => {
           rec.end = performance.now() - T0;
           rec.hdr = tm.hdr - T0; rec.status = tm.status;
+          if (tm.retries) { rec.retries = tm.retries; rec.codes = tm.codes; }
           stats.requests++; stats.net += r.buf.length;
           if (r.buf.length !== end - begin) throw new Error(`Drive trả ${r.buf.length} byte, cần ${end - begin}`);
           for (let i = a; i <= b; i++) {
@@ -220,6 +248,7 @@
           }
         }).catch((e) => {
           if (rec.end == null) { rec.end = performance.now() - T0; if (tm.hdr) { rec.hdr = tm.hdr - T0; rec.status = tm.status; } }
+          if (tm.retries) { rec.retries = tm.retries; rec.codes = tm.codes; }
           rec.err = e.constructor.name === 'AuthNeeded' ? '401' : e.message.slice(0, 40);
           for (let i = a; i <= b; i++) mine.get(i).rej(e);
         }).finally(() => { for (let i = a; i <= b; i++) inflight.delete(i); });
@@ -457,8 +486,14 @@
       if (opts.seen) {
         stats.seenMs = Math.round(now);
         stats.drawMs = Math.round(now - stats.docMs);
-        lines.splice(1, 0, `  Mốc: đợt 1 xong ${stats.firstMs} ms, đọc cấu trúc xong ${stats.openMs ?? '?'} ms, tài liệu mở xong (pdf.js) ${stats.docMs} ms, ` +
-          `thấy trang ${stats.seenMs} ms → vẽ trang đầu ${stats.drawMs} ms (từ lúc tài liệu mở xong${opts.renderMs != null ? `; riêng lệnh vẽ ${opts.renderMs} ms` : ''}).` +
+        // m3-4: tách "chờ Drive" (lần gọi cuối xong trước khi thấy trang) khỏi "giải mã + vẽ". Edge 14/10 ghi "vẽ trang đầu 8356 ms"
+        // nhưng gần hết là chờ đợt 2 tải xong, không phải vẽ chậm.
+        const netEnd = Math.max(stats.docMs, ...calls.filter((c) => c.end != null && c.end <= now).map((c) => c.end));
+        const waitNet = Math.round(netEnd - stats.docMs), paint = Math.round(now - netEnd);
+        lines.splice(1, 0, `  Mốc: ${opts.tokenMs >= 50 ? `chờ gia hạn token ${opts.tokenMs} ms trước khi bắt đầu (không tính vào các mốc dưới), ` : ''}` +
+          `đợt 1 xong ${stats.firstMs} ms, đọc cấu trúc xong ${stats.openMs ?? '?'} ms, tài liệu mở xong (pdf.js) ${stats.docMs} ms, ` +
+          `thấy trang ${stats.seenMs} ms → vẽ trang đầu ${stats.drawMs} ms (từ lúc tài liệu mở xong: chờ Drive ${waitNet} ms, giải mã + vẽ ${paint} ms` +
+          `${opts.renderMs != null ? `; lệnh vẽ tính cả chờ dữ liệu ${opts.renderMs} ms` : ''}).` +
           `${prepBefore ? ` Trước khi mở: đã ${prepBefore.by === 'prepare' ? 'bấm Chuẩn bị' : 'mở'} quyển này trên máy (lưu ${new Date(prepBefore.at).toLocaleString('vi-VN')}).` : ' Trước khi mở: chưa chuẩn bị.'}`,
           '  ' + vis.summary(now));
       }
