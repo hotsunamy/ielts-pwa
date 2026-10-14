@@ -57,6 +57,40 @@ const shortScope = (s) => s.replace('https://www.googleapis.com/auth/', '');
 
 // ---------- Đăng nhập kiểu cửa sổ (Google Identity Services) ----------
 let tokenClient = null;
+// Tải thư viện GIS bằng code (m3-2): lỗi thì tự thử lại 2 lần (sau 2 và 5 giây), có mạng lại thì thử tiếp.
+// Vẫn hỏng thì các nút đăng nhập / gia hạn chuyển sang kiểu chuyển trang thay vì chỉ báo "chưa sẵn sàng".
+const GIS_URL = 'https://accounts.google.com/gsi/client';
+const GIS_RETRY = [2000, 5000];
+let gisState = 'loading';   // loading | ok | failed
+function loadGis(attempt = 1) {
+  gisState = 'loading';
+  const sc = document.createElement('script');
+  sc.src = GIS_URL; sc.async = true;
+  const fail = (why) => {
+    sc.remove();
+    if (attempt <= GIS_RETRY.length) {
+      log(`Không tải được thư viện đăng nhập Google (lần ${attempt}: ${why}), tự thử lại sau ${GIS_RETRY[attempt - 1] / 1000} giây.`);
+      setTimeout(() => loadGis(attempt + 1), GIS_RETRY[attempt - 1]);
+    } else {
+      gisState = 'failed';
+      log(`Không tải được thư viện đăng nhập Google sau ${attempt} lần (${why}). Nút đăng nhập và gia hạn sẽ dùng kiểu chuyển trang.`);
+      renderAuth();
+    }
+  };
+  sc.onload = () => {
+    if (window.google && google.accounts && google.accounts.oauth2) { gisState = 'ok'; if (attempt > 1) log(`Tải được thư viện đăng nhập Google ở lần ${attempt}.`); onGisLoaded(); }
+    else fail('tải xong nhưng thiếu google.accounts');
+  };
+  sc.onerror = () => fail('lỗi mạng hoặc bị chặn');
+  document.head.appendChild(sc);
+}
+window.addEventListener('online', () => { if (gisState === 'failed') { log('Có mạng lại, thử tải lại thư viện đăng nhập Google.'); loadGis(1); } });
+// Không dùng được cửa sổ đăng nhập (GIS hỏng): chuyển trang. Gọi từ thao tác bấm.
+function loginFallback(what) {
+  if (gisState === 'loading') { log(`Thư viện đăng nhập Google đang tải lại, bấm ${what} lại sau vài giây.`); return; }
+  log(`Thư viện đăng nhập Google không tải được, ${what} bằng kiểu chuyển trang.`);
+  loginRedirect();
+}
 function onGisLoaded() {
   if (!CFG.CLIENT_ID || CFG.CLIENT_ID.startsWith('DAN_')) {
     log('Chưa điền CLIENT_ID trong config.js.');
@@ -90,7 +124,12 @@ function ensureToken() {
   const a = loadAuth();
   if (a && a.token && a.expiresAt > Date.now() + 5 * 60_000) return Promise.resolve(true);
   if (!a) return Promise.reject(new AuthError('Chưa đăng nhập'));
-  if (!tokenClient) return Promise.reject(new AuthError('Token hết hạn, hãy đăng nhập lại'));
+  if (!tokenClient) {
+    if (gisState === 'loading') return Promise.reject(new AuthError('Token hết hạn, thư viện đăng nhập Google đang tải lại, bấm lại sau vài giây'));
+    // GIS không tải được: gia hạn bằng chuyển trang (rời trang hiện tại, quay lại app với token mới).
+    loginFallback('gia hạn token');
+    return Promise.reject(new AuthError('Token hết hạn, đang chuyển sang trang đăng nhập Google để gia hạn'));
+  }
   const p = new Promise((resolve, reject) => {
     tokenWaiters.push(resolve);
     setTimeout(() => reject(new AuthError('Gia hạn token quá 60 giây chưa xong')), 60_000);
@@ -252,6 +291,9 @@ function renderAuth() {
   } else st.innerHTML = '<span class="warn">Token đã hết hạn.</span> Bấm "Thử gia hạn token" hoặc đăng nhập lại.';
   $('btn-check').disabled = !a;
   $('btn-refresh').disabled = !a;
+  const gisDown = !tokenClient && gisState === 'failed';
+  $('btn-refresh').textContent = gisDown ? 'Gia hạn token (chuyển trang)' : 'Thử gia hạn token';
+  $('btn-login').textContent = gisDown ? 'Đăng nhập Google (chuyển trang)' : 'Đăng nhập Google';
   $('btn-expire').disabled = !ok;
   $('btn-logout').disabled = !a;
   if (window.Library) window.Library.onAuth(!!a);
@@ -268,12 +310,16 @@ function init() {
   renderLog();
   handleRedirectReturn();
   renderAuth();
-  $('btn-login').onclick = () => loginPopup(false);
+  $('btn-login').onclick = () => (tokenClient ? loginPopup(false) : loginFallback('đăng nhập'));
   $('btn-login-redirect').onclick = loginRedirect;
-  $('btn-refresh').onclick = () => (loadAuth() && loadAuth().via === 'chuyển trang' && !tokenClient ? loginRedirect() : loginPopup(true));
+  $('btn-refresh').onclick = () => (tokenClient ? loginPopup(true) : loginFallback('gia hạn token'));
   $('btn-expire').onclick = simulateExpiry;
   $('btn-logout').onclick = logout;
-  $('btn-check').onclick = checkDrive;
+  // Như các nút khác: gọi ensureToken() trước mọi await để cửa sổ gia hạn không bị chặn (m3-2 mục 5).
+  $('btn-check').onclick = () => {
+    const wait = ensureToken();
+    wait.then(checkDrive, (e) => { $('drive-result').innerHTML = `<p class="warn">${esc(e.message)}</p>`; log('Kiểm tra: ' + e.message); });
+  };
   $('btn-copy-log').onclick = async () => {
     try { await navigator.clipboard.writeText($('log').textContent); log('Đã chép nhật ký.'); }
     catch (_) { log('Không chép được, hãy bôi đen và chép tay.'); }
@@ -284,5 +330,6 @@ function init() {
     navigator.serviceWorker.register('sw.js').catch((e) => log('Service worker lỗi: ' + e.message));
   }
   log(`Mở app (${isStandalone() ? 'đã cài' : 'trình duyệt'}, ${navigator.userAgent.match(/iPhone|iPad|Android|Mac|Windows/)?.[0] || 'khác'}).`);
+  loadGis();
 }
 init();

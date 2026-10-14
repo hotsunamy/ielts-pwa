@@ -108,9 +108,13 @@
     banner('Đang mở…');
     $('v-status').textContent = '';
     const t0 = performance.now();
+    // Trang sẽ hiện đầu tiên (để tải trước đúng trang đó trong lúc pdf.js mở tài liệu).
+    const c0 = pcfg(opts.file.id);
+    const startPage = st.mode === 'exam' ? (c0.marks[st.segKey] || 1) : (c0.lastPage || 1);
     try {
       await wait;
       st.src = await PdfSource.openDocument(opts.file, {
+        startPage,
         onStats: status,
         // Token hết hạn giữa chừng: dừng tải, chờ Minh bấm (trình duyệt chỉ cho mở cửa sổ gia hạn khi có thao tác bấm).
         onAuthNeeded: (retry) => {
@@ -139,11 +143,31 @@
     } else st.page = Math.min(st.num, pcfg(opts.file.id).lastPage || 1);
     banner('');
     log(`Mở PDF ${opts.file.name}: ${st.num} trang, chế độ ${st.mode === 'exam' ? 'làm đề ' + st.segKey : 'ôn tập'}, ${st.src.stats.mode === 'range' ? 'lấy từng đoạn' : 'tải cả file'}, ${Math.round(performance.now() - t0)} ms.`);
+    const src = st.src;
     await render();
+    if (st.src !== src) return;
+    src.report(`Mở xong, thấy trang ${st.page} sau ${Math.round(performance.now() - t0)} ms`);
+    backgroundPrefetch(src);
+  }
+
+  // Tải nền (m3-2 mục 3): làm đề thì tải mọi trang của phần ngay; ôn tập thì chờ 3 giây (để trang đang xem tải xong
+  // trước) rồi tải trang đầu của mỗi phần đã đánh dấu.
+  function backgroundPrefetch(src) {
+    const run = (pages, why) => {
+      if (st.src !== src || !pages.length) return;
+      src.prefetchPages(pages, why).catch((e) => log(`PDF ${st.file ? st.file.name : ''}: ${why} dừng: ${e.message}`));
+    };
+    if (st.mode === 'exam') run(st.allowed.filter((p) => p !== st.page), `tải nền phần ${S.LABEL[st.segKey]}`);
+    else {
+      const firsts = [...new Set(st.segs.map((x) => x.start))].filter((p) => p !== st.page);
+      clearTimeout(st.bgTimer);
+      st.bgTimer = setTimeout(() => run(firsts, 'tải nền trang đầu mỗi phần'), 3000);
+    }
   }
 
   async function closeDoc() {
     st.seq++;
+    clearTimeout(st.bgTimer);
     try { if (st.task) st.task.cancel(); } catch (_) {}
     if (st.src) { try { await st.src.close(); } catch (_) {} }
     st.src = null; st.doc = null; st.pageObj = null; st.task = null;

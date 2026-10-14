@@ -1,9 +1,9 @@
 // Service worker: chỉ lưu vỏ app (HTML, CSS, JS, icon) để mở nhanh và cài được.
 // Không đụng tới request gửi Google/Drive. Cache PDF (ielts-pdf-*) do pdfsource.js quản lý, không xóa ở đây.
-const VERSION = 'm3-1';
+const VERSION = 'm3-2';
 const VENDOR = 'vendor-pdfjs-4.10.38';   // cache riêng, không bị xóa khi đổi VERSION
 const SHELL = [
-  './', 'index.html', 'style.css', 'app.js', 'config.js', 'recognize.js', 'library.js', 'sections.js', 'pdfsource.js', 'viewer.js', 'manifest.webmanifest',
+  './', 'index.html', 'style.css', 'app.js', 'config.js', 'recognize.js', 'library.js', 'sections.js', 'pdfindex.js', 'pdfsource.js', 'viewer.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-512-maskable.png', 'icons/apple-touch-icon.png',
 ];
 

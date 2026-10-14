@@ -124,7 +124,7 @@ body.viewing { overflow: hidden; }
 .mtable th, .mtable td { text-align: left; border-top: 1px solid var(--line); padding: 4px 6px; vertical-align: middle; }
 .mtable td:last-child { white-space: nowrap; text-align: right; }
 .vdetect { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 6px 0; background: var(--bg); }
-.vscroll { flex: 1; overflow: auto; -webkit-overflow-scrolling: touch; padding: 8px; }
+.vscroll { flex: 1; overflow-x: auto; overflow-y: scroll; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; padding: 8px; }   /* luôn chừa chỗ thanh cuộn dọc: trang vẽ ra không rộng hơn khung (m3-2 mục 4) */
 .vbox { position: relative; margin: 0 auto; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.25); }
 .vbox canvas { display: block; }
 .vink { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
