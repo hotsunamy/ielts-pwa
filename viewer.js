@@ -146,7 +146,7 @@
     const src = st.src;
     await render();
     if (st.src !== src) return;
-    src.report(`Mở xong, thấy trang ${st.page} sau ${Math.round(performance.now() - t0)} ms`);
+    src.report(`Mở xong, thấy trang ${st.page} sau ${Math.round(performance.now() - t0)} ms`, { seen: true, renderMs: st.lastRender ? st.lastRender.ms : null });
     backgroundPrefetch(src);
   }
 
@@ -524,6 +524,8 @@
     const signedIn = !!loadAuth();
     $('ex-review').disabled = !f || !signedIn;
     $('ex-probe').disabled = !f || !signedIn;
+    $('ex-prep').disabled = !f || !signedIn || prepBusy;
+    updatePrep(f);
     if (!f) { ss.innerHTML = ''; $('ex-exam').disabled = true; $('ex-hint').textContent = ''; return; }
     const c = pcfg(f.id);
     const keys = S.KEYS.filter((k) => S.isTestKey(k) && c.marks[k] != null);
@@ -534,6 +536,56 @@
       !keys.length ? 'Chưa đánh dấu trang cho PDF này. Bấm "Mở ôn tập" rồi "Đánh dấu trang".' :
       `Đã đánh dấu ${Object.keys(c.marks).length} phần. Chặn khi làm đề: ${blocked.join(', ') || 'chưa đánh dấu phần nào cần chặn (Audioscripts, Đáp án, Bài mẫu)'}.`;
   }
+  // ---------- Nút "Chuẩn bị quyển này" (m3-3) ----------
+  // Tải sẵn vào cache phần cấu trúc PDF (đầu, đuôi, xref, object stream/object nhỏ, cây trang) để lần mở đầu chỉ còn
+  // tải dữ liệu trang. Trạng thái "đã chuẩn bị" = mọi đoạn cấu trúc đang có trong cache máy này.
+  let prepBusy = false, prepSeq = 0;
+  async function updatePrep(f) {
+    const el = $('ex-prep-st');
+    if (!el) return;
+    const my = ++prepSeq;
+    if (!f) { el.textContent = ''; return; }
+    let s;
+    try { s = await PdfSource.prepStatus(f); } catch (_) { s = { state: 'none' }; }
+    if (my !== prepSeq || prepBusy) return;
+    el.className = 'hint' + (s.state === 'ready' ? ' ok' : '');
+    el.textContent = s.state === 'ready' ? `Đã chuẩn bị: phần cấu trúc (${PdfSource.mb(s.total * PdfSource.CHUNK)}) có sẵn trong máy. Trang đã tải sẵn mở ngay, trang khác chỉ còn tải dữ liệu trang đó.`
+      : s.state === 'partial' ? `Chuẩn bị dở: có ${s.have}/${s.total} đoạn cấu trúc trong máy. Bấm để tải nốt.`
+      : `Chưa chuẩn bị. Bấm để tải sẵn phần cấu trúc PDF và trang đầu mỗi phần đã đánh dấu (Cam 15 khoảng 3 MB + 2 MB). App đọc xref trước, báo dung lượng rồi hỏi trước khi tải. Nên dùng Wi-Fi.`;
+  }
+  async function prepClick() {
+    const f = selFile(); if (!f || prepBusy) return;
+    const wait = window.ensureToken();   // gọi trước mọi await để cửa sổ gia hạn không bị chặn
+    const el = $('ex-prep-st'), btn = $('ex-prep');
+    prepBusy = true; btn.disabled = true; prepSeq++;
+    el.className = 'hint'; el.textContent = 'Đang đọc cấu trúc PDF…';
+    const phone = /iPhone|iPad|Android/.test(navigator.userAgent);
+    try {
+      await wait;
+      const r = await PdfSource.prepare(f, {
+        onProgress: (t) => { el.textContent = t; },
+        // Trang sẽ mở trước: trang đang xem dở (ôn tập) và trang đầu mỗi phần đã đánh dấu (làm đề).
+        pages: (n) => { const c = pcfg(f.id); return [c.lastPage || 1, ...S.segments(c.marks, n).map((x) => x.start)]; },
+        confirm: async ({ readMB, needMB, chunks, pages, pageMB }) => confirm(`Chuẩn bị ${f.name}: đã đọc cấu trúc (${readMB.toFixed(2)} MB). ` +
+          `Cần tải thêm khoảng ${(needMB + pageMB).toFixed(1)} MB vào bộ nhớ máy: phần cấu trúc còn lại ${needMB.toFixed(1)} MB (${chunks} đoạn 16 KB)` +
+          (pages ? ` và dữ liệu ${pages} trang sẽ mở trước (trang đang xem dở, trang đầu mỗi phần đã đánh dấu), ước khoảng ${pageMB.toFixed(1)} MB.` : '.') +
+          (phone ? '\n\nNên dùng Wi-Fi.' : '\n\nNên dùng Wi-Fi nếu đang dùng mạng di động.') + '\n\nTải tiếp?'),
+      });
+      prepBusy = false;
+      await updatePrep(f);
+      if (r) el.textContent = `Chuẩn bị xong sau ${(r.ms / 1000).toFixed(1)} giây: tải ${PdfSource.mb(r.net)} qua ${r.calls} lần gọi. ` + el.textContent;
+      else el.textContent = 'Đã hủy chuẩn bị. ' + el.textContent;
+    } catch (e) {
+      prepBusy = false;
+      el.className = 'hint bad';
+      el.textContent = (e instanceof PdfSource.AuthNeeded ? 'Token hết hạn, bấm lại để gia hạn rồi chuẩn bị tiếp. ' : 'Chuẩn bị lỗi: ') + e.message;
+      log(`Chuẩn bị ${f.name} lỗi: ${e.message}`);
+    } finally {
+      prepBusy = false;
+      btn.disabled = !selFile() || !loadAuth();
+    }
+  }
+
   async function probeClick() {
     const f = selFile(); if (!f) return;
     const wait = window.ensureToken();
@@ -557,6 +609,7 @@
     $('ex-review').onclick = () => { const f = selFile(); if (f) open({ file: f, mode: 'review' }); };
     $('ex-exam').onclick = () => { const f = selFile(); if (f) open({ file: f, mode: 'exam', segKey: $('ex-seg').value }); };
     $('ex-probe').onclick = probeClick;
+    $('ex-prep').onclick = prepClick;
     $('ex-cache-btn').onclick = () => cacheClick(false);
     $('ex-cache-clear').onclick = () => cacheClick(true);
     refreshPicker();

@@ -1,4 +1,5 @@
 // Mốc 3: lấy PDF từ Drive của Minh theo từng đoạn byte (header Range), có cache đoạn trong máy.
+// Bản m3-3: đuôi file 256 KB, nhật ký tóm tắt theo đợt + thời gian vẽ trang đầu + tab bị ẩn, nút "Chuẩn bị quyển này".
 // Bản m3-2: ghi lại từng lần gọi Drive; tự đọc cấu trúc PDF (pdfindex.js, kể cả xref nén) để tải trước song song
 // những gì pdf.js sẽ cần, thay vì để pdf.js tự hỏi từng chỗ một, mỗi chỗ một lần chờ mạng.
 // Không có nội dung Cambridge nào trong code. File chỉ đọc từ Drive của người đăng nhập.
@@ -12,11 +13,16 @@
   const CHUNK = 16 * 1024;   // cỡ đoạn: nhỏ để object rải rác tốn ít byte; đoạn liền nhau (ảnh scan) vẫn gộp 1 lần gọi
   const CHUNK_CACHE = 'ielts-pdf-chunks-16k-v1';
   const FULL_CACHE = 'ielts-pdf-full-v1';
-  const TAIL_CHUNKS = 4;          // 64 KB cuối file: startxref và (thường) cả bảng xref
+  // 256 KB cuối file: startxref và các phần xref. m3-2 lấy 64 KB; Cam 15 thật có phần xref thứ hai (theo /Prev) nằm ngay
+  // trước 64 KB cuối nên tốn thêm 1 lần chờ (khoảng 2 s). 256 KB lấy luôn phần đó trong đợt 1.
+  const TAIL_CHUNKS = 16;
   const EARLY_CAP = 4e6;          // đợt tải thứ 2 (object stream + object nhỏ) tối đa 4 MB
   // Số lần gọi song song khi tải trước. Drive chạy HTTP/2 (nhiều yêu cầu chung một kết nối). PDF xref dạng bảng có từ điển
   // trang rải khắp file (147 trang = khoảng 150 chỗ), 6 luồng thì thành 25 đợt chờ nối tiếp (đo giả lập: 70 s), gọi gần như cùng lúc thì còn 1–2 đợt (Chrome tự xếp hàng nếu Drive giới hạn số yêu cầu đồng thời, thường 100).
-  const LANES = 128;
+  // m3-3: 256 (m3-2: 128). Cam 15 thật cần khoảng 146 lần gọi object nhỏ; với 128 luồng, 18 lần gọi còn lại phải chờ vòng sau,
+  // thêm một lần chờ Drive (2–4 s; thấy trong nhật ký Edge 14/10: đợt 3 xong rải tới giây 14). Đợt 2 tối đa EARLY_CAP = 4 MB
+  // = 244 đoạn 16 KB, nên 256 luồng luôn gửi hết trong một lượt; nếu Drive/trình duyệt giới hạn, trình duyệt tự xếp hàng.
+  const LANES = 256;
   const GAP = 2;                  // hai dải cách nhau tới 2 đoạn (32 KB) thì gộp chung một lần gọi
   const MEM_CAP = 48e6;           // giữ tối đa chừng này byte đoạn trong bộ nhớ (ngoài Cache API) để đọc lại nhanh
 
@@ -77,6 +83,8 @@
   // ---------- Nhật ký từng lần gọi Drive ----------
   // Mỗi lần gọi: lý do, offset, KB, bắt đầu / có header / xong (ms tính từ lúc bấm mở), song song với lần gọi nào không.
   // "Đợt" = nhóm các lần gọi chồng lên nhau về thời gian; số đợt là số lần phải chờ mạng nối tiếp.
+  // m3-3: in bảng tóm tắt theo đợt trước, rồi bảng chi tiết chỉ 10 lần gọi đầu + 10 lần gọi chậm nhất.
+  const SHOW_FIRST = 10, SHOW_SLOW = 10;
   function callTable(calls, title) {
     if (!calls.length) return [`${title}: không gọi Drive lần nào (lấy hết từ cache).`];
     const sorted = [...calls].sort((a, b) => a.start - b.start);
@@ -91,16 +99,245 @@
     const span = Math.max(...sorted.map((c) => c.end ?? c.start)) - sorted[0].start;
     const waits = sorted.filter((c) => c.hdr != null).map((c) => c.hdr - c.start);
     const avgWait = waits.length ? Math.round(waits.reduce((s, x) => s + x, 0) / waits.length) : 0;
-    const lines = [`${title}: ${calls.length} lần gọi Drive, ${kb(bytes)} KB, ${wave} đợt nối tiếp, chờ header trung bình ${avgWait} ms.`,
-      '  #  đợt  lý do                 offset      KB   bắt đầu  có header  xong     ms   song song'];
-    const MAX = 40;
+    const lines = [`${title}: ${calls.length} lần gọi Drive, ${kb(bytes)} KB, ${wave} đợt nối tiếp, chờ header trung bình ${avgWait} ms.`];
+    // Tóm tắt theo đợt
+    lines.push(' đợt  lần gọi      KB  bắt đầu    xong  chờ header nhỏ/tb/lớn (ms)  lý do');
+    for (let w = 1; w <= wave; w++) {
+      const g = sorted.filter((c) => c.wave === w);
+      const ws = g.filter((c) => c.hdr != null).map((c) => Math.round(c.hdr - c.start));
+      const why = new Map();
+      for (const c of g) why.set(c.why, (why.get(c.why) || 0) + 1);
+      const whyTxt = [...why].map(([k, n]) => (n > 1 ? `${k} ×${n}` : k)).join(', ');
+      const kbw = kb(g.reduce((s, c) => s + (c.len || 0), 0));
+      const t0 = Math.round(Math.min(...g.map((c) => c.start)));
+      const t1 = Math.round(Math.max(...g.map((c) => c.end ?? c.start)));
+      const wt = ws.length ? `${Math.min(...ws)}/${Math.round(ws.reduce((s, x) => s + x, 0) / ws.length)}/${Math.max(...ws)}` : '-';
+      const err = g.filter((c) => c.err || (c.status && c.status !== 206)).length;
+      lines.push(`${String(w).padStart(4)} ${String(g.length).padStart(8)} ${kbw.padStart(7)} ${String(t0).padStart(8)} ${String(t1).padStart(7)}  ${wt.padStart(26)}  ${whyTxt}${err ? ` (${err} lần lỗi)` : ''}`);
+    }
+    // Chi tiết: 10 lần gọi đầu + 10 lần gọi chậm nhất (theo thời gian từ bắt đầu tới xong)
+    const dur = (c) => (c.end != null ? c.end - c.start : Infinity);
+    const pick = new Set(sorted.slice(0, SHOW_FIRST));
+    [...sorted].sort((a, b) => dur(b) - dur(a)).slice(0, SHOW_SLOW).forEach((c) => pick.add(c));
+    lines.push(`  Chi tiết${sorted.length > pick.size ? ` (${SHOW_FIRST} lần gọi đầu + ${SHOW_SLOW} lần chậm nhất, bỏ ${sorted.length - pick.size} lần khác)` : ''}:`);
+    lines.push('    #  đợt  lý do                 offset      KB   bắt đầu  có header  xong     ms   song song');
+    let prev = -1;
     for (const [k, c] of sorted.entries()) {
-      if (k === MAX) { lines.push(`  … còn ${sorted.length - MAX} lần gọi nữa`); break; }
+      if (!pick.has(c)) continue;
+      if (prev >= 0 && k !== prev + 1) lines.push('    …');
+      prev = k;
       const ms = c.end != null ? Math.round(c.end - c.start) : '-';
-      lines.push(`  ${String(k + 1).padStart(2)} ${String(c.wave).padStart(3)}  ${c.why.padEnd(20).slice(0, 20)} ${String(c.off).padStart(10)} ${kb(c.len).padStart(6)} ${String(Math.round(c.start)).padStart(8)} ${c.hdr != null ? String(Math.round(c.hdr)).padStart(9) : '        -'} ${c.end != null ? String(Math.round(c.end)).padStart(6) : '     -'} ${String(ms).padStart(6)}   ${c.par ? 'có (' + c.par + ')' : 'nối tiếp'}${c.status && c.status !== 206 ? ' mã ' + c.status : ''}${c.err ? ' lỗi: ' + c.err : ''}`);
+      lines.push(`  ${String(k + 1).padStart(3)} ${String(c.wave).padStart(3)}  ${c.why.padEnd(20).slice(0, 20)} ${String(c.off).padStart(10)} ${kb(c.len).padStart(6)} ${String(Math.round(c.start)).padStart(8)} ${c.hdr != null ? String(Math.round(c.hdr)).padStart(9) : '        -'} ${c.end != null ? String(Math.round(c.end)).padStart(6) : '     -'} ${String(ms).padStart(6)}   ${c.par ? 'có (' + c.par + ')' : 'nối tiếp'}${c.status && c.status !== 206 ? ' mã ' + c.status : ''}${c.err ? ' lỗi: ' + c.err : ''}`);
     }
     lines.push(`  (khoảng thời gian từ lần gọi đầu tới lần cuối xong: ${Math.round(span)} ms)`);
     return lines;
+  }
+
+  // ---------- Tab / app bị ẩn (m3-3) ----------
+  // Trình duyệt dừng hoặc làm chậm việc vẽ (requestAnimationFrame) khi tab bị ẩn hay app iPhone chuyển nền.
+  // Ghi lại số lần và tổng thời gian bị ẩn trong lúc mở, để biết các khoảng chờ "không có lần gọi nào" là do đâu.
+  function trackHidden(T0) {
+    const t = { count: 0, ms: 0, periods: [], since: null };
+    const now = () => performance.now() - T0;
+    const isHidden = () => document.visibilityState === 'hidden';
+    const on = () => {
+      if (isHidden() && t.since == null) { t.since = now(); t.count++; }
+      else if (!isHidden() && t.since != null) { const e = now(); t.periods.push([t.since, e]); t.ms += e - t.since; t.since = null; }
+    };
+    if (isHidden()) { t.since = 0; t.count = 1; }
+    document.addEventListener('visibilitychange', on);
+    t.stop = () => document.removeEventListener('visibilitychange', on);
+    t.summary = (upTo) => {
+      const ps = t.periods.map((p) => p.slice()).concat(t.since != null ? [[t.since, upTo ?? now()]] : []);
+      const total = ps.reduce((s, p) => s + p[1] - p[0], 0);
+      if (!ps.length) return 'Tab/app không bị ẩn trong lúc này.';
+      return `Tab/app bị ẩn ${ps.length} lần, tổng ${Math.round(total)} ms (${ps.slice(0, 5).map((p) => `${Math.round(p[0])}–${Math.round(p[1])}`).join(', ')}${ps.length > 5 ? ', …' : ''} ms).`;
+    };
+    return t;
+  }
+
+  // ---------- Khung tải đoạn dùng chung (mở tài liệu và nút "Chuẩn bị quyển này") ----------
+  function makeLoader(file, size, T0) {
+    const stats = { size, net: 0, cache: 0, requests: 0, mode: 'range', firstMs: null, chunks: Math.ceil(size / CHUNK) };
+    const L = { stats, calls: [], closed: false, touched: new Set(), onStats: null };
+    const nChunks = stats.chunks;
+    const mem = new Map();     // đoạn đã có trong bộ nhớ
+    let memBytes = 0;
+    const remember = (i, piece) => {
+      if (mem.has(i)) return;
+      if (memBytes + piece.length > MEM_CAP) { mem.clear(); memBytes = 0; }
+      mem.set(i, piece); memBytes += piece.length;
+    };
+    const emit = () => L.onStats && L.onStats(stats);
+
+    // Lấy các đoạn [from, to] (chỉ số đoạn): bộ nhớ, rồi cache, đoạn đang tải dở thì chờ chung, phần thiếu gộp thành
+    // dải liền rồi xin mạng song song. Trả về Map chỉ số đoạn -> byte. why = lý do, để ghi nhật ký.
+    const inflight = new Map();
+    async function getChunks(from, to, why) {
+      const idx = [];
+      for (let i = from; i <= to; i++) { idx.push(i); L.touched.add(i); }
+      const out = new Map();
+      const pend = new Map();   // chỉ số đoạn -> promise byte (đang tải, của lần gọi này hay lần gọi khác)
+      const mine = new Map();   // đoạn do lần gọi này giữ chỗ: {res, rej}
+      for (const i of idx) {
+        if (mem.has(i)) { out.set(i, mem.get(i)); stats.cache += mem.get(i).length; continue; }
+        if (!inflight.has(i)) {
+          // Giữ chỗ NGAY (trước mọi await) để phần khác chạy cùng lúc (pdf.js, tìm trang đầu...) chờ chung, không xin trùng.
+          let res, rej;
+          const pr = new Promise((y, n) => { res = y; rej = n; });
+          pr.catch(() => {});   // tránh báo lỗi "promise không ai bắt"; ai chờ đoạn này vẫn nhận lỗi
+          inflight.set(i, pr); mine.set(i, { res, rej });
+        }
+        pend.set(i, inflight.get(i));
+      }
+      const look = [...mine.keys()];
+      const cached = await Promise.all(look.map((i) => cacheGet(file.id, i)));
+      const missing = [];
+      look.forEach((i, k) => {
+        if (cached[k]) { remember(i, cached[k]); stats.cache += cached[k].length; mine.get(i).res(cached[k]); inflight.delete(i); }
+        else missing.push(i);
+      });
+      const runs = [];
+      for (const i of missing) {
+        const last = runs[runs.length - 1];
+        if (last && last[1] === i - 1) last[1] = i; else runs.push([i, i]);
+      }
+      for (const [a, b] of runs) {
+        const begin = a * CHUNK, end = Math.min(size, (b + 1) * CHUNK);
+        const rec = { why: why || '?', off: begin, len: end - begin, start: performance.now() - T0 };
+        L.calls.push(rec);
+        const tm = {};
+        fetchRange(file.id, begin, end, tm).then((r) => {
+          rec.end = performance.now() - T0;
+          rec.hdr = tm.hdr - T0; rec.status = tm.status;
+          stats.requests++; stats.net += r.buf.length;
+          if (r.buf.length !== end - begin) throw new Error(`Drive trả ${r.buf.length} byte, cần ${end - begin}`);
+          for (let i = a; i <= b; i++) {
+            const piece = r.buf.slice((i - a) * CHUNK, Math.min(r.buf.length, (i - a + 1) * CHUNK));
+            remember(i, piece);
+            cachePut(file.id, i, piece.slice());   // bản sao riêng: Cache API giữ bản của nó
+            mine.get(i).res(piece);
+          }
+        }).catch((e) => {
+          if (rec.end == null) { rec.end = performance.now() - T0; if (tm.hdr) { rec.hdr = tm.hdr - T0; rec.status = tm.status; } }
+          rec.err = e.constructor.name === 'AuthNeeded' ? '401' : e.message.slice(0, 40);
+          for (let i = a; i <= b; i++) mine.get(i).rej(e);
+        }).finally(() => { for (let i = a; i <= b; i++) inflight.delete(i); });
+      }
+      for (const [i, pr] of pend) out.set(i, await pr);
+      emit();
+      return out;
+    }
+    async function bytes(begin, end, why) {   // byte [begin, end) bất kỳ, qua getChunks
+      end = Math.min(end, size);
+      const a = Math.floor(begin / CHUNK), b = Math.floor((end - 1) / CHUNK);
+      const m = await getChunks(a, b, why);
+      const all = new Uint8Array((b - a + 1) * CHUNK); let o = 0;
+      for (let i = a; i <= b; i++) { all.set(m.get(i), o); o += m.get(i).length; }
+      return all.subarray(begin - a * CHUNK, end - a * CHUNK);
+    }
+    // Đoạn 16 KB cần cho một loạt dải byte [begin, end).
+    function chunkSet(ranges) {
+      const want = new Set();
+      for (const [b0, e0] of ranges) {
+        const e = Math.min(e0, size);
+        if (e <= b0) continue;
+        for (let i = Math.floor(b0 / CHUNK); i <= Math.floor((e - 1) / CHUNK); i++) want.add(i);
+      }
+      return want;
+    }
+    // Tải trước một loạt đoạn byte [begin, end): gộp theo đoạn 16 KB, bỏ đoạn đã có, chia dải liền cho LANES luồng song song.
+    async function prefetchRanges(ranges, why) {
+      const want = [...chunkSet(ranges)].filter((i) => !mem.has(i));
+      if (!want.length) return;
+      const list = want.sort((a, b) => a - b);
+      const runs = [];
+      for (const i of list) { const last = runs[runs.length - 1]; if (last && i - last[1] <= GAP + 1 && last[1] - last[0] < 255) last[1] = i; else runs.push([i, i]); }
+      let k = 0;
+      const lane = async () => { while (k < runs.length && !L.closed) { const [a, b] = runs[k++]; await getChunks(a, b, why); } };
+      await Promise.all(Array.from({ length: Math.min(LANES, runs.length) }, lane));
+    }
+    // Đợt 1: đoạn đầu (dữ liệu khởi đầu cho pdf.js, cũng là phép thử Range) và đuôi file (startxref, các phần xref) cùng lúc.
+    async function wave1() {
+      const tailFrom = Math.max(1, nChunks - TAIL_CHUNKS);
+      const [h] = await Promise.all([getChunks(0, 0, 'đầu file'), nChunks > 1 ? getChunks(tailFrom, nChunks - 1, 'đuôi file') : null]);
+      stats.firstMs = Math.round(performance.now() - T0);
+      return h.get(0);
+    }
+    Object.assign(L, { getChunks, bytes, prefetchRanges, chunkSet, wave1, mem, nChunks });
+    return L;
+  }
+  const makeIndex = (L) => PdfIndex.create({ size: L.stats.size, read: (a, b) => L.bytes(a, b, 'đọc cấu trúc'), prefetch: (rs, why) => L.prefetchRanges(rs, why || 'tải trước') });
+
+  // ---------- Ghi nhớ "đã chuẩn bị" (m3-3) ----------
+  // Danh sách đoạn 16 KB của phần cấu trúc (đầu, đuôi, xref, object stream/object nhỏ, cây trang) theo từng file.
+  // "Đã chuẩn bị" = mọi đoạn trong danh sách đang có trong cache máy này. Lưu dạng dải để gọn.
+  const PREP_KEY = 'ielts.prep';
+  const loadPrep = () => { try { return JSON.parse(localStorage.getItem(PREP_KEY)) || {}; } catch (_) { return {}; } };
+  function savePrep(file, set, extra) {
+    const list = [...set].sort((a, b) => a - b);
+    const runs = [];
+    for (const i of list) { const l = runs[runs.length - 1]; if (l && l[1] === i - 1) l[1] = i; else runs.push([i, i]); }
+    const all = loadPrep();
+    all[file.id] = Object.assign({ runs, chunks: list.length, size: Number(file.size) || 0, at: Date.now() }, extra || {});
+    try { localStorage.setItem(PREP_KEY, JSON.stringify(all)); } catch (_) {}
+  }
+  async function prepStatus(file) {
+    const r = loadPrep()[file.id];
+    if (!r || !r.runs) return { state: 'none' };
+    const c = await chunkCache();
+    if (!c) return { state: 'none' };
+    let have = 0;
+    const idx = [];
+    for (const [a, b] of r.runs) for (let i = a; i <= b; i++) idx.push(i);
+    const hits = await Promise.all(idx.map((i) => c.match(chunkKey(file.id, i)).then((x) => !!x, () => false)));
+    hits.forEach((h) => { if (h) have++; });
+    return { state: have === idx.length ? 'ready' : have ? 'partial' : 'none', have, total: idx.length, mb: idx.length * CHUNK / 1e6, at: r.at, by: r.by };
+  }
+
+  // ---------- Nút "Chuẩn bị quyển này" (m3-3) ----------
+  // Tải sẵn vào cache phần cấu trúc PDF mà pdf.js bắt buộc đọc trước khi mở: đợt 1 (đầu + đuôi file), đợt 2 (object stream,
+  // object nhỏ) và cây trang. Đọc xref xong thì hỏi trước (hooks.confirm) với dung lượng còn phải tải.
+  // Thêm (m3-3, để mở lần đầu dưới 2 s): dữ liệu các trang sẽ mở trước (hooks.pages(số trang) trả danh sách: trang đang xem dở
+  // và trang đầu mỗi phần đã đánh dấu). Không có bước này thì lần mở đầu vẫn phải chờ Drive 1 lần (2–4 s) cho dữ liệu trang.
+  // hooks: {confirm({readMB, needMB, chunks, pages, pageMB}) -> Promise<bool>, onProgress(text), pages(n) -> [số trang]}
+  async function prepare(file, hooks = {}) {
+    const T0 = performance.now();
+    let size = Number(file.size) || 0;
+    if (!size) { const meta = await driveGet('files/' + encodeURIComponent(file.id), { fields: 'size' }); size = Number(meta.size); }
+    const L = makeLoader(file, size, T0);
+    const vis = trackHidden(T0);
+    const prog = (t) => hooks.onProgress && hooks.onProgress(t);
+    L.onStats = (s) => prog(`Đang chuẩn bị: đã tải ${mb(s.net)} (${s.requests} lần gọi)…`);
+    try {
+      try { await L.wave1(); } catch (e) { if (e instanceof NoRange) throw new Error('Drive không cho lấy từng đoạn của file này, nên không chuẩn bị được (khi mở sẽ tải cả file).'); throw e; }
+      const index = makeIndex(L);
+      const info = await index.load();
+      const early = index.earlyRanges(EARLY_CAP, CHUNK);
+      const want = [...L.chunkSet(early.ranges)];
+      const c = await chunkCache();
+      const hit = c ? await Promise.all(want.map((i) => L.mem.has(i) || c.match(chunkKey(file.id, i)).then((x) => !!x, () => false))) : want.map(() => false);
+      const need = want.filter((_, k) => !hit[k]).length;
+      const readMB = L.stats.net / 1e6, needMB = need * CHUNK / 1e6;
+      // Ước lượng dữ liệu trang: phần còn lại của file chia đều cho số trang (chưa biết số trang trước khi đọc cây trang,
+      // lấy /Count của nút gốc nếu đọc được, không thì 150).
+      let nPages = 150;
+      try { const cat = await index.obj(index.trailer.Root.R); const root = cat && cat.Pages ? await index.obj(cat.Pages.R) : null; if (root && root.Count) nPages = root.Count; } catch (_) {}
+      const pageList = hooks.pages ? [...new Set(hooks.pages(nPages))].filter((p) => p >= 1 && p <= nPages) : [];
+      const pageMB = pageList.length * Math.max(0, size - want.length * CHUNK) / nPages / 1e6;
+      log(`Chuẩn bị ${file.name}: xref ${info.kind}, ${info.sections} phần, ${info.objects} object, ${info.objStms} object stream. Đã đọc ${mb(L.stats.net)}, còn ${need} đoạn (${mb(need * CHUNK)}) cần tải (${early.note}).`);
+      if (hooks.confirm && !(await hooks.confirm({ readMB, needMB, chunks: need, pages: pageList.length, pageMB }))) { log(`Chuẩn bị ${file.name}: đã hủy.`); return null; }
+      await L.prefetchRanges(early.ranges, 'object stream/nhỏ');
+      const pg = await index.pages('cây trang');
+      savePrep(file, L.touched, { by: 'prepare' });
+      let pr = null;
+      if (pageList.length) pr = await index.prefetchPages(pageList.filter((p) => p <= pg.list.length), 'trang đầu các phần', () => false);
+      const ms = Math.round(performance.now() - T0);
+      callTable(L.calls, `Chuẩn bị xong ${file.name} sau ${ms} ms, ${pg.list.length} trang, cấu trúc ${L.touched.size} đoạn` +
+        `${pr ? `, dữ liệu ${pageList.length} trang (${pageList.join(', ')})` : ''} (mốc thời gian tính bằng ms từ lúc bấm)`).forEach((l) => log(l));
+      log('  ' + vis.summary());
+      return { ms, net: L.stats.net, calls: L.calls.length, pages: pg.list.length, chunks: L.touched.size };
+    } finally { vis.stop(); }
   }
 
   // ---------- Mở tài liệu ----------
@@ -114,130 +351,65 @@
       const meta = await driveGet('files/' + encodeURIComponent(file.id), { fields: 'size' });
       size = Number(meta.size);
     }
-    const stats = { size, net: 0, cache: 0, requests: 0, mode: 'range', firstMs: null, chunks: Math.ceil(size / CHUNK) };
+    const L = makeLoader(file, size, T0);
+    const { stats, calls } = L;
+    L.onStats = (s) => hooks.onStats && hooks.onStats(s);
     const emit = () => hooks.onStats && hooks.onStats(stats);
-    const nChunks = stats.chunks;
-    const calls = [];          // mọi lần gọi Drive của tài liệu này
+    const nChunks = L.nChunks;
+    const vis = trackHidden(T0);
     let reported = 0;          // số lần gọi đã ghi vào nhật ký
-    let closed = false;
-    const mem = new Map();     // đoạn đã có trong bộ nhớ
-    let memBytes = 0;
-    const remember = (i, piece) => {
-      if (mem.has(i)) return;
-      if (memBytes + piece.length > MEM_CAP) { mem.clear(); memBytes = 0; }
-      mem.set(i, piece); memBytes += piece.length;
-    };
+    const prepBefore = loadPrep()[file.id];
 
-    // Lấy các đoạn [from, to] (chỉ số đoạn): bộ nhớ, rồi cache, đoạn đang tải dở thì chờ chung, phần thiếu gộp thành
-    // dải liền rồi xin mạng song song. Trả về Map chỉ số đoạn -> byte. why = lý do, để ghi nhật ký.
-    const inflight = new Map();
-    async function getChunks(from, to, why) {
-      const idx = [];
-      for (let i = from; i <= to; i++) idx.push(i);
-      const out = new Map();
-      const look = [];
-      for (const i of idx) { if (mem.has(i)) { out.set(i, mem.get(i)); stats.cache += mem.get(i).length; } else if (!inflight.has(i)) look.push(i); }
-      const cached = await Promise.all(look.map((i) => cacheGet(file.id, i)));
-      const missing = [];
-      look.forEach((i, k) => {
-        if (cached[k]) { out.set(i, cached[k]); remember(i, cached[k]); stats.cache += cached[k].length; }
-        else if (!inflight.has(i)) missing.push(i);
-      });
-      const runs = [];
-      for (const i of missing) {
-        const last = runs[runs.length - 1];
-        if (last && last[1] === i - 1) last[1] = i; else runs.push([i, i]);
-      }
-      for (const [a, b] of runs) {
-        const begin = a * CHUNK, end = Math.min(size, (b + 1) * CHUNK);
-        const rec = { why: why || '?', off: begin, len: end - begin, start: performance.now() - T0 };
-        calls.push(rec);
-        const tm = {};
-        const p = fetchRange(file.id, begin, end, tm).then((r) => {
-          rec.end = performance.now() - T0;
-          rec.hdr = tm.hdr - T0; rec.status = tm.status;
-          stats.requests++; stats.net += r.buf.length;
-          if (r.buf.length !== end - begin) throw new Error(`Drive trả ${r.buf.length} byte, cần ${end - begin}`);
-          const m = new Map();
-          for (let i = a; i <= b; i++) {
-            const piece = r.buf.slice((i - a) * CHUNK, Math.min(r.buf.length, (i - a + 1) * CHUNK));
-            m.set(i, piece); remember(i, piece);
-            cachePut(file.id, i, piece.slice());   // bản sao riêng: Cache API giữ bản của nó
-          }
-          return m;
-        }, (e) => { rec.end = performance.now() - T0; if (tm.hdr) { rec.hdr = tm.hdr - T0; rec.status = tm.status; } rec.err = e.constructor.name === 'AuthNeeded' ? '401' : e.message.slice(0, 40); throw e; });
-        for (let i = a; i <= b; i++) {
-          const d = p.then((m) => m.get(i));
-          d.catch(() => {});   // tránh báo lỗi "promise không ai bắt"; ai chờ đoạn này vẫn nhận lỗi
-          inflight.set(i, d);
-        }
-        p.catch(() => {}).finally(() => { for (let i = a; i <= b; i++) inflight.delete(i); });
-      }
-      for (const i of idx) if (!out.has(i)) out.set(i, await inflight.get(i));
-      emit();
-      return out;
-    }
-    async function bytes(begin, end, why) {   // byte [begin, end) bất kỳ, qua getChunks
-      end = Math.min(end, size);
-      const a = Math.floor(begin / CHUNK), b = Math.floor((end - 1) / CHUNK);
-      const m = await getChunks(a, b, why);
-      const all = new Uint8Array((b - a + 1) * CHUNK); let o = 0;
-      for (let i = a; i <= b; i++) { all.set(m.get(i), o); o += m.get(i).length; }
-      return all.subarray(begin - a * CHUNK, end - a * CHUNK);
-    }
-    // Tải trước một loạt đoạn byte [begin, end): gộp theo đoạn 16 KB, bỏ đoạn đã có, chia dải liền cho LANES luồng song song.
-    async function prefetchRanges(ranges, why) {
-      const want = new Set();
-      for (const [b0, e0] of ranges) {
-        const e = Math.min(e0, size);
-        if (e <= b0) continue;
-        for (let i = Math.floor(b0 / CHUNK); i <= Math.floor((e - 1) / CHUNK); i++) if (!mem.has(i)) want.add(i);
-      }
-      if (!want.size) return;
-      const list = [...want].sort((a, b) => a - b);
-      const runs = [];
-      for (const i of list) { const last = runs[runs.length - 1]; if (last && i - last[1] <= GAP + 1 && last[1] - last[0] < 255) last[1] = i; else runs.push([i, i]); }
-      let k = 0;
-      const lane = async () => { while (k < runs.length && !closed) { const [a, b] = runs[k++]; await getChunks(a, b, why); } };
-      await Promise.all(Array.from({ length: Math.min(LANES, runs.length) }, lane));
-    }
-
-    // Đợt 1: đoạn đầu (dữ liệu khởi đầu cho pdf.js, cũng là phép thử Range) và đuôi file (startxref, bảng xref) cùng lúc.
     let first;
     try {
-      const tailFrom = Math.max(1, nChunks - TAIL_CHUNKS);
-      const [h] = await Promise.all([getChunks(0, 0, 'đầu file'), nChunks > 1 ? getChunks(tailFrom, nChunks - 1, 'đuôi file') : null]);
-      first = h.get(0);
+      first = await L.wave1();
     } catch (e) {
+      vis.stop();
       if (e instanceof NoRange) return openFull(libP, file, size, stats, hooks, e);
       throw e;
     }
-    stats.firstMs = Math.round(performance.now() - T0);
 
     // Đọc cấu trúc, tải trước object stream / object nhỏ (đợt 2), đi cây trang, rồi tải trước trang đầu tiên sẽ xem (đợt 3,
     // chạy song song với lúc pdf.js mở tài liệu). Lỗi ở đây thì bỏ qua: pdf.js vẫn tự tải, chỉ chậm hơn (như m3-1).
-    let index = null, warm = null;
+    let index = null, warm = null, structP = Promise.resolve();
     const pf = { notes: [] };
     stats.prefetch = pf;
     try {
-      index = PdfIndex.create({ size, read: (a, b) => bytes(a, b, 'đọc cấu trúc'), prefetch: (rs, why) => prefetchRanges(rs, why || 'tải trước') });
+      index = makeIndex(L);
       const info = await index.load();
       pf.notes.push(`xref ${info.kind}, ${info.sections} phần, ${info.objects} object, ${info.objStms} object stream`);
       const early = index.earlyRanges(EARLY_CAP, CHUNK);
-      await prefetchRanges(early.ranges, 'object stream/nhỏ');
       pf.notes.push('đợt 2: ' + early.note);
-      const pg = await index.pages('cây trang');
-      pf.pages = pg.list.length;
-      const start = Math.min(pg.list.length, Math.max(1, hooks.startPage || 1));
-      warm = index.prefetchPages([start], 'trang ' + start, () => closed);
+      const earlyP = L.prefetchRanges(early.ranges, 'object stream/nhỏ');   // mọi đoạn được giữ chỗ ngay khi gọi
+      earlyP.catch(() => {});
+      // Trang sẽ hiện đầu tiên: tìm nhanh theo /Count rồi tải dữ liệu trang ngay khi catalog, nút gốc, từ điển trang về,
+      // không chờ lần gọi chậm nhất của đợt 2 (m3-3). Cây trang lạ thì chờ đọc hết cây như m3-2.
+      const start = Math.max(1, hooks.startPage || 1);
+      warm = (async () => {
+        const q = await index.prefetchPageQuick(start, 'trang ' + start, () => L.closed).catch(() => null);
+        if (q) return q;
+        await earlyP;
+        const pg = await index.pages('cây trang');
+        return index.prefetchPages([Math.min(pg.list.length, start)], 'trang ' + start, () => L.closed);
+      })();
       warm.catch(() => {});
+      // pdf.js chỉ mở xong khi có đủ phần cấu trúc (nó đọc từ điển mọi trang trước). Ghi nhận "đã có cấu trúc" sau đó.
+      structP = (async () => {
+        await earlyP;
+        const pg = await index.pages('cây trang');
+        pf.pages = pg.list.length;
+        stats.openMs = Math.round(performance.now() - T0);
+        savePrep(file, L.touched, { by: prepBefore && prepBefore.by === 'prepare' ? 'prepare' : 'open' });   // lần sau mở coi như đã chuẩn bị
+        log(`PDF ${file.name}: ${pf.notes.join('; ')}. Đọc cấu trúc xong sau ${stats.openMs} ms.`);
+      })();
+      structP.catch((e) => log(`PDF ${file.name}: đọc cây trang lỗi: ${e.message}`));
     } catch (e) {
-      if (e instanceof AuthNeeded) throw e;
+      if (e instanceof AuthNeeded) { vis.stop(); throw e; }
       index = null;
       pf.notes.push('không đọc được cấu trúc, để pdf.js tự tải: ' + e.message);
+      stats.openMs = Math.round(performance.now() - T0);
+      log(`PDF ${file.name}: ${pf.notes.join('; ')}. Đọc cấu trúc xong sau ${stats.openMs} ms.`);
     }
-    stats.openMs = Math.round(performance.now() - T0);
-    log(`PDF ${file.name}: ${pf.notes.join('; ')}. Đọc cấu trúc xong sau ${stats.openMs} ms.`);
 
     const lib = await libP;
     const pending = [];   // dải chờ gửi lại sau khi gia hạn token
@@ -245,7 +417,7 @@
       requestDataRange(begin, end) {
         const from = Math.floor(begin / CHUNK), to = Math.min(nChunks - 1, Math.ceil(end / CHUNK) - 1);
         // pdf.js ghép dữ liệu trả về với yêu cầu theo đúng `begin`, nên phải trả một khối liền cho cả yêu cầu.
-        const run = (attempt) => getChunks(from, to, 'pdf.js').then((m) => {
+        const run = (attempt) => L.getChunks(from, to, 'pdf.js').then((m) => {
           const parts = []; let len = 0;
           for (let i = from; i <= to; i++) { parts.push(m.get(i)); len += m.get(i).length; }
           const all = new Uint8Array(len); let o = 0;
@@ -270,36 +442,48 @@
       cMapUrl: CMAP_URL, cMapPacked: true, standardFontDataUrl: PDFJS_DIR + 'standard_fonts/',
       isEvalSupported: false,
     });
-    const doc = await task.promise;
+    let doc;
+    try { doc = await task.promise; } catch (e) { vis.stop(); throw e; }
     stats.docMs = Math.round(performance.now() - T0);
     emit();
 
     // Ghi bảng các lần gọi chưa ghi (gọi khi vừa thấy trang đầu, hoặc khi tải nền xong).
-    function report(title) {
+    // opts.seen: vừa thấy trang đầu → ghi thêm mốc pdf.js mở xong, thời gian vẽ trang đầu, tab/app có bị ẩn không.
+    function report(title, opts = {}) {
       const fresh = calls.slice(reported);
       reported = calls.length;
-      callTable(fresh, `${title} (${file.name}; mốc thời gian tính bằng ms từ lúc bắt đầu mở)`).forEach((l) => log(l));
+      const now = performance.now() - T0;
+      const lines = callTable(fresh, `${title} (${file.name}; mốc thời gian tính bằng ms từ lúc bắt đầu mở)`);
+      if (opts.seen) {
+        stats.seenMs = Math.round(now);
+        stats.drawMs = Math.round(now - stats.docMs);
+        lines.splice(1, 0, `  Mốc: đợt 1 xong ${stats.firstMs} ms, đọc cấu trúc xong ${stats.openMs ?? '?'} ms, tài liệu mở xong (pdf.js) ${stats.docMs} ms, ` +
+          `thấy trang ${stats.seenMs} ms → vẽ trang đầu ${stats.drawMs} ms (từ lúc tài liệu mở xong${opts.renderMs != null ? `; riêng lệnh vẽ ${opts.renderMs} ms` : ''}).` +
+          `${prepBefore ? ` Trước khi mở: đã ${prepBefore.by === 'prepare' ? 'bấm Chuẩn bị' : 'mở'} quyển này trên máy (lưu ${new Date(prepBefore.at).toLocaleString('vi-VN')}).` : ' Trước khi mở: chưa chuẩn bị.'}`,
+          '  ' + vis.summary(now));
+      }
+      lines.forEach((l) => log(l));
     }
     // Tải nền dữ liệu các trang `nums` (số trang PDF). Không chặn việc xem; dừng khi đóng tài liệu.
     async function prefetchPages(nums, why) {
       const t0 = performance.now(), n0 = stats.net, c0 = calls.length;
       let note;
       if (index) {
-        const r = await index.prefetchPages(nums, why, () => closed);
+        const r = await index.prefetchPages(nums, why, () => L.closed);
         note = `${r.waves} đợt, ${r.objects} object`;
       } else {
         // Không đọc được cấu trúc: nhờ pdf.js tải lần lượt từng trang (chậm hơn nhưng vẫn chạy).
-        for (const p of nums) { if (closed) break; try { const pg = await doc.getPage(p); await pg.getOperatorList(); pg.cleanup(); } catch (_) {} }
+        for (const p of nums) { if (L.closed) break; try { const pg = await doc.getPage(p); await pg.getOperatorList(); pg.cleanup(); } catch (_) {} }
         note = 'qua pdf.js, lần lượt';
       }
-      if (closed) return null;
+      if (L.closed) return null;
       const res = { pages: nums.length, net: stats.net - n0, calls: calls.length - c0, ms: Math.round(performance.now() - t0), note };
       log(`PDF ${file.name}: ${why}: ${nums.length} trang, tải ${mb(res.net)} qua ${res.calls} lần gọi, ${res.ms} ms (${note}).`);
       return res;
     }
     return {
-      doc, stats, report, prefetchPages, calls, warm,
-      close: () => { closed = true; return shutdown(task, worker); },
+      doc, stats, report, prefetchPages, calls, warm, hidden: vis,
+      close: () => { L.closed = true; vis.stop(); return shutdown(task, worker); },
     };
   }
 
@@ -389,8 +573,9 @@
   async function clearCache() {
     try { await caches.delete(CHUNK_CACHE); } catch (_) {}
     try { await caches.delete(FULL_CACHE); } catch (_) {}
+    try { localStorage.removeItem(PREP_KEY); } catch (_) {}
     cacheP = null;
   }
 
-  window.PdfSource = { openDocument, probe, loadPdfjs, cacheInfo, clearCache, AuthNeeded, CHUNK, mb, callTable };
+  window.PdfSource = { openDocument, prepare, prepStatus, probe, loadPdfjs, cacheInfo, clearCache, AuthNeeded, CHUNK, TAIL_CHUNKS, mb, callTable };
 })();

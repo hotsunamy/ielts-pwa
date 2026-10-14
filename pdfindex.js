@@ -402,6 +402,55 @@
         while (res == null && up != null) { res = (pg.nodes.get(up) || {}).Resources; up = pg.parent.get(up); }
         frontier.push(...refsIn({ Contents: d.Contents, Resources: res, Annots: d.Annots }));
       }
+      return follow(frontier, seen, label, isCancelled);
+    }
+
+    // m3-3: tìm nhanh object của trang p (số trang từ 1) mà không đọc hết cây trang: đi từ gốc, dựa vào /Count.
+    // Nút có /Count bằng số con thì coi mọi con là trang (cây phẳng, như Cam 15): lấy thẳng con thứ p, không phải đọc 146 trang kia.
+    // Trả {n, chain} (chain = các nút cha từ gốc) hoặc null nếu cây lạ (lúc đó dùng prefetchPages như cũ).
+    async function quickPage(p, label) {
+      const cat = await get(trailer.Root);
+      if (!isDict(cat) || !isRef(cat.Pages)) return null;
+      let node = cat.Pages.R, k = p;
+      const chain = [];
+      for (let depth = 0; depth < 32; depth++) {
+        const v = await obj(node);
+        if (!isDict(v)) return null;
+        if (v.Type === '/Page' || (v.Type !== '/Pages' && !v.Kids)) return k === 1 ? { n: node, chain } : null;
+        let kids = v.Kids;
+        if (isRef(kids)) kids = await get(kids);
+        if (!Array.isArray(kids)) return null;
+        chain.push(node);
+        if (v.Count === kids.length) { if (k < 1 || k > kids.length || !isRef(kids[k - 1])) return null; node = kids[k - 1].R; continue; }
+        const refs = kids.filter(isRef).map((r) => r.R);
+        await io.prefetch(rangesFor(refs, true), label);
+        const vals = await Promise.all(refs.map(obj));
+        let next = null;
+        for (let i = 0; i < refs.length; i++) {
+          const c = vals[i];
+          const cnt = isDict(c) && (c.Type === '/Pages' || (c.Kids && c.Type !== '/Page')) ? (Number(c.Count) || 0) : 1;
+          if (k <= cnt) { next = refs[i]; break; }
+          k -= cnt;
+        }
+        if (next == null) return null;
+        node = next;
+      }
+      return null;
+    }
+    // Tải trước dữ liệu một trang tìm bằng quickPage (không chờ đọc hết cây trang). Trang không đúng kiểu thì trả null.
+    async function prefetchPageQuick(p, label, isCancelled) {
+      const q = await quickPage(p, label);
+      if (!q) return null;
+      const d = await obj(q.n);
+      if (!isDict(d) || d.Type !== '/Page') return null;
+      let res = d.Resources;
+      for (let i = q.chain.length - 1; res == null && i >= 0; i--) res = ((await obj(q.chain[i])) || {}).Resources;
+      const r = await follow(refsIn({ Contents: d.Contents, Resources: res, Annots: d.Annots }), new Set([q.n]), label, isCancelled);
+      r.quick = true;
+      return r;
+    }
+
+    async function follow(frontier, seen, label, isCancelled) {
       let waves = 0, bytes = 0;
       while (frontier.length && waves < 8) {
         if (isCancelled && isCancelled()) break;
@@ -427,7 +476,7 @@
       return out;
     }
 
-    return { load, objStmRanges, earlyRanges, pages, prefetchPages, obj, info, entries, bound, get trailer() { return trailer; } };
+    return { load, objStmRanges, earlyRanges, pages, prefetchPages, quickPage, prefetchPageQuick, obj, info, entries, bound, get trailer() { return trailer; } };
   }
 
   const api = { create, parse, unpredict, inflate, Truncated };
