@@ -7,7 +7,7 @@
 // m4-2: đọc trước 256 KB khi trình phát xin mẩu nhỏ (Safari dò file m4a bằng nhiều lần xin nhỏ nối tiếp), giữ trong bộ nhớ
 // của service worker (tối đa 8 MB, mất khi service worker tắt), không ghi vào máy. Trang mở bằng Ctrl+F5 thì trang nhờ
 // service worker nhận quyền điều khiển (clients.claim) để cách 1b vẫn dùng được.
-const VERSION = 'm4-3';
+const VERSION = 'm4-4';
 const VENDOR = 'vendor-pdfjs-4.10.38';   // cache riêng, không bị xóa khi đổi VERSION
 const AUTH_CACHE = 'ielts-auth-v1';
 const DRIVE = 'https://www.googleapis.com/drive/v3/';

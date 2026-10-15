@@ -11,7 +11,6 @@
 (function () {
   const DRIVE = 'https://www.googleapis.com/drive/v3/';
   const METHOD_KEY = 'ielts.audiomethod';   // {[định dạng]: {use: '1b'|'2', failed: {[cách]: lý do}}} ('1a' còn trong dữ liệu cũ thì bỏ qua)
-  const LOCK_KEY = 'ielts.audiolock';       // m4-3: cách xử lý nút Phát/Tạm dừng ở màn hình khóa: 'A' | 'B' | 'C'
   const MARK_KEY = 'ielts.audiomarks';      // {[fileId]: {[part]: giây}} cho audio theo cả Test (Part 1 = 0)
   const ORDER = ['1b', '2'];
   const NAME = { '1a': 'cách 1a (link Drive kèm token)', '1b': 'cách 1b (stream qua service worker)', '2': 'cách 2 (tải cả file rồi phát)' };
@@ -39,10 +38,9 @@
     seekT: null, seekTo: null, seeks: [], prog: false, lastTime: 0, played: 0, loop: { a: null, b: null },
     pending: null, unlocked: false, wasPlaying: false,
     src: null, srcT: 0,                // m4-3: ai vừa bấm Phát/Tạm dừng ('app' | 'màn hình khóa'), để ghi nhật ký
-    bgPlay: false,                     // m4-3: audio được phát lại lúc app đang ẩn (màn hình khóa) → mở lại app thì tự sửa
+    hidePaused: null,                  // m4-4: vị trí (giây) app tự tạm dừng do rời app; null = không
   };
-  const lockMode = () => { const v = localStorage.getItem(LOCK_KEY); return v === 'B' || v === 'C' ? v : 'A'; };
-  const LOCK_NAME = { A: 'A (app xử lý)', B: 'B (để iOS tự xử lý)', C: 'C (app nạp lại file đúng chỗ)' };
+  const isHidden = () => document.visibilityState === 'hidden';
   const blobs = new Map();   // fileId -> {url, size}
 
   // ---------- Dữ liệu audio của quyển (từ kết quả nhận diện ở Thư viện) ----------
@@ -292,6 +290,7 @@
     const a = audio();
     if (!st.cur || !st.cur.file) return;
     st.src = 'app'; st.srcT = performance.now();
+    if (st.hidePaused != null) { st.hidePaused = null; clearNote('info'); }
     if (st.loaded) {
       if (!a.paused) { a.pause(); return; }
       const fresh = (() => { const x = loadAuth(); return x && x.expiresAt > Date.now() + 5 * 60_000; })();
@@ -513,6 +512,7 @@
   // ---------- Sự kiện thẻ audio ----------
   function onPlaying() {
     if (isSilent()) return;
+    if (isHidden()) { pauseForHide('bắt đầu phát lúc app đang ẩn'); }
     syncButtons(); clearNote('wait'); clearNote('hint');
     if (st.tClick != null && st.method) {
       const ms = Math.round(performance.now() - st.tClick);
@@ -659,61 +659,54 @@
     try { if ('mediaSession' in navigator) navigator.mediaSession.playbackState = st.loaded && !a.paused ? 'playing' : 'paused'; } catch (_) {}
   }
 
-  // Màn hình khóa / tai nghe: phát, tạm dừng; tua chỉ ở ôn tập.
-  // m4-3: iPhone (app đã cài) tạm dừng rồi phát lại từ màn hình khóa thì giây vẫn chạy nhưng mất tiếng (Minh thử 15/10, mp3 và m4a,
-  // kể cả phát lại ngay). Chưa rõ cách chữa nên có 3 cách để thử, chọn ở thẻ Đề › Kiểm tra kỹ thuật:
-  //   A: app tự xử lý Phát/Tạm dừng (như m4-2); B: không gắn nút Phát/Tạm dừng, để iOS tự xử lý;
-  //   C: Phát từ màn hình khóa thì app nạp lại file đúng chỗ đang dừng.
+  // Màn hình khóa / tai nghe. m4-4 (Minh chốt 15/10): rời app (khóa màn hình, chuyển app/tab) thì audio tự tạm dừng, quay lại
+  // bấm Phát để nghe tiếp đúng chỗ. Lý do: iPhone (app đã cài) tạm dừng rồi phát lại khi app ở nền thì trình phát đứng yên, mất
+  // tiếng (thử 15/10 cả 3 cách: app xử lý, để iOS xử lý, nạp lại file; đều hỏng). Nên nút Phát ở màn hình khóa không làm gì khi app
+  // đang ẩn; khi app đang hiện (vd tai nghe) thì vẫn phát. Tua chỉ ở ôn tập.
   function mediaSession() {
     if (!('mediaSession' in navigator) || !st.cur) return;
     const ms = navigator.mediaSession, a = audio();
     const set = (k, fn) => { try { ms.setActionHandler(k, fn); } catch (_) {} };
     try { ms.metadata = new MediaMetadata({ title: st.cur.label, artist: 'Luyện IELTS' }); } catch (_) {}
-    const mode = lockMode();
-    const mark = () => { st.src = 'màn hình khóa'; st.srcT = performance.now(); };
-    if (mode === 'B') { set('play', null); set('pause', null); }
-    else {
-      set('pause', () => { mark(); a.pause(); });
-      set('play', () => {
-        mark();
-        if (mode === 'C' && st.loaded && st.cur && st.cur.file) {
-          const pos = a.currentTime || st.lastTime || 0;
-          log(`Audio: màn hình khóa bấm Phát (cách C): nạp lại file ở ${fmt(pos)}.`);
-          st.tClick = performance.now();
-          start(pos, true);
-          return;
-        }
-        a.play().catch((e) => log(`Audio: màn hình khóa bấm Phát lỗi: ${e.name} ${e.message || ''}`.trim()));
-      });
-    }
+    set('pause', () => { st.src = 'màn hình khóa / tai nghe'; st.srcT = performance.now(); a.pause(); });
+    set('play', () => {
+      if (isHidden()) { log('Audio: bấm Phát ở màn hình khóa lúc app đang ẩn: bỏ qua (mở app rồi bấm Phát).'); return; }
+      st.src = 'tai nghe'; st.srcT = performance.now();
+      if (st.hidePaused != null) { st.hidePaused = null; clearNote('info'); }
+      a.play().catch(() => {});
+    });
     const rv = st.mode === 'review';
     set('seekbackward', rv ? () => userSeek(a.currentTime - 5, 'lùi 5 s (màn hình khóa)') : null);
     set('seekforward', rv ? () => userSeek(a.currentTime + 5, 'tiến 5 s (màn hình khóa)') : null);
     set('seekto', rv ? (d) => userSeek(d.seekTime, 'tua (màn hình khóa)') : null);
   }
-  // Ghi nhật ký mỗi lần Phát/Tạm dừng do người bấm (trong app hoặc màn hình khóa) hoặc xảy ra lúc app đang ẩn.
+  // Nhật ký mỗi lần Phát/Tạm dừng do người bấm (trong app, màn hình khóa, tai nghe), hoặc xảy ra lúc app đang ẩn.
   function onPlayPause(what) {
     const a = audio();
     if (isSilent() || !st.cur || !st.cur.file) return;
     const recent = st.src && performance.now() - st.srcT < 1500;
-    const hidden = document.visibilityState === 'hidden';
-    if (what === 'phát' && hidden) st.bgPlay = true;
-    if (!recent && !hidden) return;
-    if (!st.loaded || a.readyState === 0) return;   // đang nạp file (cách C, đổi Part): chưa có vị trí thật, chờ lần phát sau khi nạp xong
-    const who = recent ? st.src : 'iOS / màn hình khóa (không qua app)';
-    log(`Audio: ${what} ở ${fmt(a.currentTime)} (nguồn: ${who}; app đang ${hidden ? 'ẩn' : 'hiện'}; nút màn hình khóa ${LOCK_NAME[lockMode()]}; ${NAME[st.method] || st.method || '?'}; readyState ${a.readyState}).`);
+    if (!recent && !isHidden()) return;
+    if (!st.loaded || a.readyState === 0) return;
+    if (!recent && what === 'tạm dừng' && st.hidePaused != null) return;   // đã ghi "tạm dừng do rời app"
+    log(`Audio: ${what} ở ${fmt(a.currentTime)} (nguồn: ${recent ? st.src : 'hệ thống'}; app đang ${isHidden() ? 'ẩn' : 'hiện'}).`);
     if (recent) st.src = null;
   }
-  // Mở lại app sau khi audio được phát lại từ màn hình khóa: tạm dừng rồi phát lại ngay (như Minh bấm tay trong app thì có tiếng lại).
-  function onVisible() {
-    if (document.visibilityState !== 'visible' || !st.bgPlay) return;
-    st.bgPlay = false;
+  // Rời app thì tạm dừng, nhớ vị trí. Quay lại thì để dừng, hiện hướng dẫn bấm Phát.
+  function pauseForHide(why) {
     const a = audio();
-    if (!st.loaded || a.paused || isSilent()) return;
-    const pos = a.currentTime;
-    log(`Audio: mở lại app sau khi phát từ màn hình khóa, tự tạm dừng rồi phát lại ở ${fmt(pos)} (sửa mất tiếng).`);
+    if (isSilent() || !st.cur || !st.cur.file) return;
+    st.hidePaused = a.currentTime || 0;
+    st.src = null;
     a.pause();
-    setTimeout(() => { a.play().catch((e) => { note('Bấm Phát để nghe tiếp.', 'info'); log(`Audio: tự phát lại lỗi: ${e.name}`); }); }, 60);
+    log(`Audio: tạm dừng do rời app (${why}) ở ${fmt(st.hidePaused)}${st.mode === 'exam' ? ', đang làm đề' : ''}.`);
+    note(`Đã tạm dừng khi rời app ở ${fmt(st.hidePaused)}. Bấm Phát để nghe tiếp.`, 'info');
+    try { if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; } catch (_) {}
+  }
+  function onVisible() {
+    const a = audio();
+    if (!$('ap') || !st.open) return;
+    if (isHidden()) { if (st.loaded && !a.paused) pauseForHide('khóa màn hình / chuyển app / chuyển tab'); return; }
+    if (st.hidePaused != null) log(`Audio: quay lại app, vẫn tạm dừng ở ${fmt(a.currentTime)}, chờ bấm Phát.`);
   }
 
   // Dừng file hiện tại và ghi tóm tắt (nghe bao lâu, gọi Drive mấy lần, tua mấy lần).
@@ -731,7 +724,7 @@
     const a = audio();
     try { a.pause(); } catch (_) {}
     a.removeAttribute('src'); try { a.load(); } catch (_) {}
-    st.loaded = false; st.pending = null; st.tClick = null; st.lastTime = 0; st.played = 0; st.seeks = []; st.prog = false; st.seekT = null; st.midErr = false;
+    st.loaded = false; st.pending = null; st.tClick = null; st.lastTime = 0; st.played = 0; st.seeks = []; st.prog = false; st.seekT = null; st.midErr = false; st.hidePaused = null;
     clearNote('wait');
     clearLoop();
     syncButtons();
@@ -748,11 +741,6 @@
     const btn = $('ap-reset'), out = $('ap-tech');
     if (!btn) return;
     out.textContent = techText();
-    const sel = $('ap-lock');
-    if (sel) {
-      sel.value = lockMode();
-      sel.onchange = () => { try { localStorage.setItem(LOCK_KEY, sel.value); } catch (_) {} log(`Audio: nút màn hình khóa đổi sang cách ${LOCK_NAME[sel.value]}.`); if (st.open) mediaSession(); };
-    }
     btn.onclick = () => { localStorage.removeItem(METHOD_KEY); log('Audio: xóa cách phát đã nhớ, lần phát sau thử lại từ cách 1b.'); out.textContent = techText(); };
     const d = document.querySelector('#exam-card details.tech');
     if (d) d.addEventListener('toggle', () => { out.textContent = techText(); });
