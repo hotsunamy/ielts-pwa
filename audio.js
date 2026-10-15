@@ -1,6 +1,7 @@
-// Mốc 4 (m4-1): phát audio Listening từ Drive của Minh. Không có nội dung Cambridge trong code, không lưu audio vào máy.
-// Ba cách, app tự thử theo thứ tự và nhớ cách đã chạy cho từng định dạng (mp3, m4a) trên máy này:
-//   1a. link Drive kèm token trên URL (?access_token=): đơn giản nhất nếu Drive còn nhận;
+// Mốc 4 (m4-1, m4-2): phát audio Listening từ Drive của Minh. Không có nội dung Cambridge trong code, không lưu audio vào máy.
+// App tự thử theo thứ tự 1b → 2, ghi lại cách đã chạy cho từng định dạng (mp3, m4a) trên máy này (chỉ để xem, không khóa cứng:
+// lần sau vẫn thử 1b trước nếu service worker đang điều khiển trang). m4-2 bỏ cách 1a (link Drive kèm ?access_token=): chạy thật
+// 15/10 trên Edge và iPhone Drive đều từ chối, mỗi lần thử mất 10–15 s.
 //   1b. stream qua service worker (sw.js, đường "ap/<id>"): service worker gắn token và chuyển tiếp Range, tua tới đâu tải tới đó;
 //   2.  tải cả file về bộ nhớ rồi phát (dự phòng, chỉ giữ trong phiên này, không lưu vào máy);
 //   3.  link mở trình phát của Drive (dự phòng cuối, không lặp đoạn, không đổi tốc độ).
@@ -9,9 +10,9 @@
 'use strict';
 (function () {
   const DRIVE = 'https://www.googleapis.com/drive/v3/';
-  const METHOD_KEY = 'ielts.audiomethod';   // {[định dạng]: {use: '1a'|'1b'|'2', failed: {[cách]: lý do}}}
+  const METHOD_KEY = 'ielts.audiomethod';   // {[định dạng]: {use: '1b'|'2', failed: {[cách]: lý do}}} ('1a' còn trong dữ liệu cũ thì bỏ qua)
   const MARK_KEY = 'ielts.audiomarks';      // {[fileId]: {[part]: giây}} cho audio theo cả Test (Part 1 = 0)
-  const ORDER = ['1a', '1b', '2'];
+  const ORDER = ['1b', '2'];
   const NAME = { '1a': 'cách 1a (link Drive kèm token)', '1b': 'cách 1b (stream qua service worker)', '2': 'cách 2 (tải cả file rồi phát)' };
   const SPEEDS = [0.75, 0.85, 1, 1.1, 1.25, 1.5];
   const START_TIMEOUT = 15000;   // quá chừng này chưa có dữ liệu thì coi cách đó không chạy, thử cách sau
@@ -269,6 +270,9 @@
     let s = ''; for (const b of buf) s += String.fromCharCode(b);
     return (SILENT = 'data:audio/wav;base64,' + btoa(s));
   }
+  // Đoạn im lặng không phải audio thật: mọi sự kiện của nó (playing, ended, error...) bỏ qua (m4-2: trước đây nó làm nhật ký
+  // ghi "null, có tiếng sau 85 ms", và ở làm đề có thể bị coi là hết Part).
+  const isSilent = () => !!SILENT && audio().getAttribute('src') === SILENT;
   function unlock() {
     if (st.unlocked) return;
     st.unlocked = true;
@@ -286,7 +290,7 @@
       // Token sắp hết: gia hạn ngay trong thao tác bấm (trình duyệt chỉ cho mở cửa sổ gia hạn lúc này), rồi phát tiếp.
       const wait = window.ensureToken();
       const pos = a.currentTime;
-      wait.then(() => window.authSynced()).then(() => (st.method === '1a' ? start(pos, true) : a.play().catch(playErr)), (e) => note(e.message, 'err'));
+      wait.then(() => window.authSynced()).then(() => a.play().catch(playErr), (e) => note(e.message, 'err'));
       return;
     }
     if (st.pending) return;
@@ -310,8 +314,9 @@
     const mem = loadJSON(METHOD_KEY, {});
     const m = mem[kind] || { failed: {} };
     m.failed = m.failed || {};
-    let order = m.use ? [m.use, ...ORDER.filter((x) => x !== m.use)] : ORDER.slice();
-    order = order.filter((x) => x === m.use || !m.failed[x]);
+    // Luôn theo thứ tự ưu tiên 1b → 2 (bỏ các cách đã hỏng trên máy này). Cách đã nhớ không khóa cứng: trước đây Edge mở bằng
+    // Ctrl+F5 (không có service worker) thì nhớ "cách 2" và không bao giờ thử lại 1b.
+    let order = ORDER.filter((x) => !m.failed[x]);
     const skip = [];
     if (!navigator.serviceWorker || !navigator.serviceWorker.controller) { order = order.filter((x) => x !== '1b'); skip.push('1b (service worker chưa điều khiển trang, tải lại app 1 lần)'); }
     const can = audio().canPlayType(mimeOf(f));
@@ -356,10 +361,7 @@
       st.tag = Math.random().toString(36).slice(2, 10);
       st.calls = [];
       let src;
-      if (meth === '1a') {
-        const t = (loadAuth() || {}).token;
-        src = DRIVE + 'files/' + encodeURIComponent(f.id) + '?alt=media&access_token=' + encodeURIComponent(t || '');
-      } else if (meth === '1b') {
+      if (meth === '1b') {
         src = new URL('ap/' + encodeURIComponent(f.id) + '?' + new URLSearchParams({ size: f.size || '', mime: mimeOf(f), n: st.tag }), location.href).href;
       } else {
         const r = await download(f, gen);
@@ -466,24 +468,49 @@
     if (d.status === 401 && (st.loaded || st.midErr)) authStop();
   }
   function callSummary() {
-    const cs = st.calls;
-    if (st.method === '1a') return 'trình duyệt gọi thẳng Drive, app không thấy từng lần gọi';
-    if (!cs.length) return 'không gọi Drive lần nào';
+    let cs = st.calls;
+    const memN = cs.filter((c) => c.mem).length;
+    cs = cs.filter((c) => !c.mem);
+    if (!cs.length) return 'không gọi Drive lần nào' + (memN ? ` (${memN} lần lấy từ bộ nhớ đọc trước)` : '');
     const w = cs.filter((c) => c.hdr).map((c) => c.hdr - c.start);
     const bytes = cs.reduce((s, c) => s + (c.len || 0), 0);
     const rt = cs.filter((c) => c.retries);
     return `${cs.length} lần gọi Drive, chờ header ${w.length ? `nhỏ/tb/lớn ${Math.min(...w)}/${Math.round(w.reduce((s, x) => s + x, 0) / w.length)}/${Math.max(...w)} ms` : '?'}, đã tải ${mb(bytes)}` +
-      (rt.length ? `, tự thử lại ${rt.length} lần gọi (mã ${[...new Set(rt.flatMap((c) => c.codes || []))].join(', ')})` : '');
+      (rt.length ? `, tự thử lại ${rt.length} lần gọi (mã ${[...new Set(rt.flatMap((c) => c.codes || []))].join(', ')})` : '') +
+      (memN ? `, ${memN} lần lấy từ bộ nhớ đọc trước` : '');
+  }
+
+  // m4-2: bảng từng lần gọi (cách 1b) tới lúc có tiếng: dải byte, KB, mốc ms tính từ lúc bấm, nguồn (Drive / bộ nhớ đọc trước).
+  // "Đợt" = nhóm lần gọi chạy chồng thời gian; số đợt = số lần phải chờ Drive nối tiếp nhau.
+  function callDetail(t0) {
+    const cs = st.calls.filter((c) => c.start).slice().sort((x, y) => x.start - y.start);
+    if (!cs.length) return;
+    let wave = 0, waveEnd = -Infinity;
+    const rows = cs.map((c) => {
+      const hdr = c.hdr || c.end;
+      if (c.mem) return { c, w: '-' };
+      if (c.start >= waveEnd) { wave++; waveEnd = hdr || Infinity; } else if (hdr) waveEnd = Math.min(waveEnd, hdr);
+      return { c, w: String(wave) };
+    });
+    const r = (v) => (v == null ? '-' : String(Math.round(v - t0)));
+    const kb = (c) => (c.want != null ? Math.round(c.want / 1024) : c.len != null ? Math.round(c.len / 1024) : '?');
+    log(`  Chi tiết ${cs.length} lần xin dữ liệu tới lúc có tiếng (${wave} đợt chờ Drive nối tiếp; mốc ms tính từ lúc bấm):`);
+    log('     #  đợt  dải trình phát xin        KB xin  bắt đầu  có header     xong  nguồn');
+    rows.forEach(({ c, w }, i) => log('    ' + [String(i + 1).padStart(2), w.padStart(4), (c.range || '(không Range)').padEnd(26), String(kb(c)).padStart(6),
+      r(c.start).padStart(8), r(c.hdr).padStart(10), r(c.end).padStart(8),
+      ' ' + (c.mem ? 'bộ nhớ đọc trước' : (c.ra ? `Drive, đọc trước ${Math.round(c.ra / 1024)} KB` : 'Drive') + (c.status ? ` ${c.status}` : '') + (c.err ? `, ${c.err}` : '') + (c.cancelled ? ', trình phát hủy' : ''))].join(' ')));
   }
 
   // ---------- Sự kiện thẻ audio ----------
   function onPlaying() {
+    if (isSilent()) return;
     syncButtons(); clearNote('wait'); clearNote('hint');
-    if (st.tClick != null) {
+    if (st.tClick != null && st.method) {
       const ms = Math.round(performance.now() - st.tClick);
       const f = st.cur.file;
       log(`Audio ${st.cur.label} (${f.name}, ${f.size ? mb(Number(f.size)) : '?'}): ${NAME[st.method] || st.method}, có tiếng sau ${ms} ms kể từ lúc bấm` +
         `${st.tokenMs >= 50 ? ` (gồm ${st.tokenMs} ms chờ gia hạn token)` : ''}; ${callSummary()}.`);
+      if (st.method === '1b') callDetail(Date.now() - ms);
       st.tClick = null; st.tokenMs = 0;
     }
     mediaSession();
@@ -502,7 +529,7 @@
   }
   function onSeeking() {
     const a = audio();
-    if (st.prog) return;
+    if (st.prog || isSilent()) return;
     // Làm đề: không cho tua (kể cả tua từ màn hình khóa / tai nghe). Đưa về chỗ cũ.
     if (st.mode === 'exam' && Math.abs(a.currentTime - st.lastTime) > 1) {
       st.prog = true; a.currentTime = st.lastTime;
@@ -528,8 +555,9 @@
     onTime();
   }
   function onEnded() {
+    if (isSilent()) return;
     syncButtons();
-    if (st.mode !== 'exam') return;
+    if (st.mode !== 'exam' || !st.loaded) return;
     const next = st.list.findIndex((x, i) => i > st.idx && x.file);
     if (next < 0) { note(`Hết audio Test ${st.test}.`, 'info'); log(`Audio làm đề Cam ${st.book} Test ${st.test}: phát hết.`); return; }
     const skipped = st.list.slice(st.idx + 1, next).filter((x) => !x.file).map((x) => `Part ${x.part}`);
@@ -542,7 +570,7 @@
   }
   function onMidError() {
     const a = audio();
-    if (!st.loaded || !a.error) return;
+    if (!st.loaded || !a.error || isSilent()) return;
     // Lỗi sau khi đã phát được (mất mạng, token hết hạn khi trình duyệt xin đoạn mới...).
     const pos = a.currentTime || st.lastTime, code = a.error.code, gen = st.gen;
     st.loaded = false; st.resumeAt = pos;
@@ -578,10 +606,17 @@
     all[f.id] = Object.assign(all[f.id] || {}, { [st.part]: Math.round(a.currentTime * 10) / 10 });
     saveJSON(MARK_KEY, all);
     log(`Audio ${f.name}: Part ${st.part} bắt đầu ở ${fmt(a.currentTime)}.`);
+    st.cur.label = label(st.test, st.part); $('ap-title').textContent = st.cur.label;   // m4-2: tiêu đề đổi theo Part vừa đánh dấu
     fillSelectors();
     note(`Đã lưu: Part ${st.part} bắt đầu ở ${fmt(a.currentTime)}.`, 'info');
   }
   function stepPart(dir) {
+    // m4-2: ⏮ khi đã nghe quá 3 s trong Part thì về đầu Part đang nghe (như máy nghe nhạc), không nạp lại file.
+    if (dir < 0 && st.loaded && st.cur && st.cur.file) {
+      const a = audio();
+      const begin = st.data.byTest ? (st.part === 1 ? 0 : marksOf(st.cur.file.id)[st.part]) : 0;
+      if (begin != null && a.currentTime - begin > 3) { userSeek(begin, 'về đầu Part'); return; }
+    }
     const p = st.part + dir;
     if (p >= 1 && p <= 4) { $('ap-part').value = p; pick(st.test, p); return; }
     const t = st.test + dir;
@@ -655,13 +690,13 @@
     const mem = loadJSON(METHOD_KEY, {});
     const ks = Object.keys(mem);
     const sw = navigator.serviceWorker && navigator.serviceWorker.controller ? 'service worker đang điều khiển trang' : 'service worker CHƯA điều khiển trang (cách 1b chưa dùng được, tải lại app)';
-    return `Audio trên máy này: ${ks.length ? ks.map((k) => `${k} → ${mem[k].use ? NAME[mem[k].use] : 'chưa có cách chạy'}${mem[k].failed && Object.keys(mem[k].failed).length ? ` (không chạy: ${Object.keys(mem[k].failed).join(', ')})` : ''}`).join('; ') : 'chưa phát lần nào'}. ${sw}.`;
+    return `Audio trên máy này: ${ks.length ? ks.map((k) => `${k} → ${mem[k].use ? NAME[mem[k].use] : 'chưa có cách chạy'}${mem[k].failed && Object.keys(mem[k].failed).filter((x) => ORDER.includes(x)).length ? ` (không chạy: ${Object.keys(mem[k].failed).filter((x) => ORDER.includes(x)).join(', ')})` : ''}`).join('; ') : 'chưa phát lần nào'}. ${sw}.`;
   }
   function initTech() {
     const btn = $('ap-reset'), out = $('ap-tech');
     if (!btn) return;
     out.textContent = techText();
-    btn.onclick = () => { localStorage.removeItem(METHOD_KEY); log('Audio: xóa cách phát đã nhớ, lần phát sau thử lại từ cách 1a.'); out.textContent = techText(); };
+    btn.onclick = () => { localStorage.removeItem(METHOD_KEY); log('Audio: xóa cách phát đã nhớ, lần phát sau thử lại từ cách 1b.'); out.textContent = techText(); };
     const d = document.querySelector('#exam-card details.tech');
     if (d) d.addEventListener('toggle', () => { out.textContent = techText(); });
   }

@@ -344,8 +344,16 @@ function init() {
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch((e) => log('Service worker lỗi: ' + e.message));
+    // m4-2: trang mở bằng Ctrl+F5 (hoặc lần đầu cài) không qua service worker, nên audio không stream được (cách 1b).
+    // Nhờ service worker nhận quyền điều khiển trang ngay, không cần tải lại.
+    if (!navigator.serviceWorker.controller) {
+      const t0 = performance.now();
+      navigator.serviceWorker.addEventListener('controllerchange', () => log(`Service worker đã nhận điều khiển trang sau ${Math.round(performance.now() - t0)} ms (audio stream được).`), { once: true });
+      navigator.serviceWorker.ready.then((reg) => { if (!navigator.serviceWorker.controller && reg.active) reg.active.postMessage({ type: 'claim' }); }).catch(() => {});
+    }
   }
-  log(`Mở app (${isStandalone() ? 'đã cài' : 'trình duyệt'}, ${navigator.userAgent.match(/iPhone|iPad|Android|Mac|Windows/)?.[0] || 'khác'}).`);
+  const swState = !('serviceWorker' in navigator) ? 'không có service worker' : navigator.serviceWorker.controller ? 'service worker đang điều khiển' : 'service worker chưa điều khiển, đang nhờ nhận';
+  log(`Mở app (${isStandalone() ? 'đã cài' : 'trình duyệt'}, ${navigator.userAgent.match(/iPhone|iPad|Android|Mac|Windows/)?.[0] || 'khác'}; ${swState}).`);
   loadGis();
 }
 init();

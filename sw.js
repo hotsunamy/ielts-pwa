@@ -4,7 +4,10 @@
 // gắn token rồi chuyển tiếp header Range sang Drive, trả 206. Token lấy từ cache 'ielts-auth-v1' (app.js ghi mỗi khi token đổi).
 // Trình duyệt không đọc được header content-range của Drive (CORS) nên tự dựng từ dung lượng file app gửi kèm (?size=).
 // Không lưu audio vào cache: chỉ stream online (Minh chốt 14/10).
-const VERSION = 'm4-1';
+// m4-2: đọc trước 256 KB khi trình phát xin mẩu nhỏ (Safari dò file m4a bằng nhiều lần xin nhỏ nối tiếp), giữ trong bộ nhớ
+// của service worker (tối đa 8 MB, mất khi service worker tắt), không ghi vào máy. Trang mở bằng Ctrl+F5 thì trang nhờ
+// service worker nhận quyền điều khiển (clients.claim) để cách 1b vẫn dùng được.
+const VERSION = 'm4-2';
 const VENDOR = 'vendor-pdfjs-4.10.38';   // cache riêng, không bị xóa khi đổi VERSION
 const AUTH_CACHE = 'ielts-auth-v1';
 const DRIVE = 'https://www.googleapis.com/drive/v3/';
@@ -69,6 +72,39 @@ async function tell(clientId, msg) {
   } catch (_) {}
 }
 
+// Đọc trước trong bộ nhớ: khối 256 KB thẳng hàng, theo file. Chỉ dùng khi trình phát xin mẩu nhỏ (<= 256 KB).
+const RA_BLOCK = 256 * 1024, RA_MAX = 8 * 1024 * 1024;
+const raFiles = new Map();   // id -> {size, blocks: Map(chỉ số khối -> Uint8Array)}; thứ tự Map = dùng gần nhất ở cuối
+let raBytes = 0;
+function raCovered(id, size, a, b) {
+  const f = raFiles.get(id);
+  if (!f || f.size !== size) return null;
+  const parts = [];
+  for (let k = Math.floor(a / RA_BLOCK); k <= Math.floor(b / RA_BLOCK); k++) { const blk = f.blocks.get(k); if (!blk) return null; parts.push([k, blk]); }
+  raFiles.delete(id); raFiles.set(id, f);
+  const out = new Uint8Array(b - a + 1);
+  for (const [k, blk] of parts) {
+    const s = k * RA_BLOCK, from = Math.max(a, s), to = Math.min(b, s + blk.length - 1);
+    out.set(blk.subarray(from - s, to - s + 1), from - a);
+  }
+  return out;
+}
+function raStore(id, size, start, buf) {
+  let f = raFiles.get(id);
+  if (!f || f.size !== size) { if (f) raBytes -= [...f.blocks.values()].reduce((x, v) => x + v.length, 0); f = { size, blocks: new Map() }; }
+  raFiles.delete(id); raFiles.set(id, f);
+  for (let off = 0; off < buf.length; off += RA_BLOCK) {
+    const k = (start + off) / RA_BLOCK, blk = buf.slice(off, Math.min(buf.length, off + RA_BLOCK));
+    if (f.blocks.has(k)) raBytes -= f.blocks.get(k).length;
+    f.blocks.set(k, blk); raBytes += blk.length;
+  }
+  while (raBytes > RA_MAX && raFiles.size > 1) {   // bỏ file dùng lâu nhất
+    const [oid, of] = raFiles.entries().next().value;
+    if (oid === id) break;
+    raBytes -= [...of.blocks.values()].reduce((x, v) => x + v.length, 0); raFiles.delete(oid);
+  }
+}
+
 async function proxyAudio(e, url) {
   const id = decodeURIComponent(url.pathname.slice(AP_PATH.length));
   const size = Number(url.searchParams.get('size')) || 0;
@@ -86,11 +122,25 @@ async function proxyAudio(e, url) {
   }
   if (size && a >= size) return new Response('', { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
   rec.off = a; rec.want = size ? b - a + 1 : null;
+  // Đã có trong bộ nhớ đọc trước: trả luôn, không gọi Drive.
+  if (size) {
+    const hit = raCovered(id, size, a, b);
+    if (hit) {
+      rec.mem = true; rec.status = 206; rec.hdr = rec.end = Date.now(); rec.len = hit.length; tell(e.clientId, rec);
+      return new Response(hit, { status: 206, headers: { 'Content-Type': mime, 'Content-Range': `bytes ${a}-${b}/${size}`, 'Content-Length': String(hit.length), 'Accept-Ranges': 'bytes' } });
+    }
+  }
+  // Mẩu nhỏ: xin Drive cả khối 256 KB thẳng hàng (tối đa 2 khối) để các lần xin nhỏ sau lấy từ bộ nhớ.
+  let ra = null;
+  if (size && m && b - a + 1 <= RA_BLOCK) {
+    const s0 = Math.floor(a / RA_BLOCK) * RA_BLOCK, s1 = Math.min(size - 1, (Math.floor(b / RA_BLOCK) + 1) * RA_BLOCK - 1);
+    ra = { s0, s1 }; rec.ra = s1 - s0 + 1;
+  }
   let res;
   for (let k = 0; ; k++) {
     try {
       res = await fetch(DRIVE + 'files/' + encodeURIComponent(id) + '?alt=media', {
-        headers: { Authorization: 'Bearer ' + auth.token, Range: size ? `bytes=${a}-${b}` : `bytes=${a}-` },
+        headers: { Authorization: 'Bearer ' + auth.token, Range: ra ? `bytes=${ra.s0}-${ra.s1}` : size ? `bytes=${a}-${b}` : `bytes=${a}-` },
         signal: e.request.signal, cache: 'no-store',
       });
     } catch (err) {
@@ -113,6 +163,16 @@ async function proxyAudio(e, url) {
     return new Response('', { status: res.status === 401 ? 401 : 502 });
   }
   const ctype = /^audio\/|^video\/mp4/.test(res.headers.get('content-type') || '') ? res.headers.get('content-type') : mime;
+  if (ra && res.status === 206) {
+    let buf;
+    try { buf = new Uint8Array(await res.arrayBuffer()); }
+    catch (err) { rec.err = err.name === 'AbortError' ? 'trình phát hủy' : 'đứt giữa chừng: ' + (err.message || err.name); rec.end = Date.now(); tell(e.clientId, rec); return Response.error(); }
+    rec.len = buf.length; rec.end = Date.now();
+    if (buf.length !== ra.s1 - ra.s0 + 1) { rec.err = `Drive trả ${buf.length} byte thay vì ${ra.s1 - ra.s0 + 1}`; tell(e.clientId, rec); return new Response('', { status: 502 }); }
+    raStore(id, size, ra.s0, buf);
+    tell(e.clientId, rec);
+    return new Response(buf.slice(a - ra.s0, b - ra.s0 + 1), { status: 206, headers: { 'Content-Type': ctype, 'Content-Range': `bytes ${a}-${b}/${size}`, 'Content-Length': String(b - a + 1), 'Accept-Ranges': 'bytes' } });
+  }
   // Đếm byte đi qua để báo lúc xong (hoặc lúc trình phát hủy giữa chừng khi tua).
   let got = 0;
   const reader = res.body.getReader();
@@ -141,4 +201,6 @@ async function proxyAudio(e, url) {
 
 self.addEventListener('message', (e) => {
   if (e.data && e.data.type === 'ping') e.source && e.source.postMessage({ type: 'pong', version: VERSION });
+  // Trang mở bằng Ctrl+F5 không qua service worker: trang nhờ nhận quyền điều khiển để stream audio (cách 1b).
+  if (e.data && e.data.type === 'claim') e.waitUntil(self.clients.claim());
 });
