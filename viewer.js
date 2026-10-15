@@ -48,6 +48,7 @@
     <button class="small tool" data-tool="erase">Tẩy</button>
     <button class="small secondary" data-v="undo">Hoàn tác</button>
     <button class="small secondary" data-v="marks" id="v-marks-btn">Đánh dấu trang</button>
+    <button class="small secondary" data-v="audio" id="v-audio-btn">Audio</button>
   </div>
   <div id="v-banner"></div>
   <div id="v-marks" class="vpanel" hidden></div>
@@ -103,6 +104,7 @@
     $('v-mode').className = 'badge ' + (st.mode === 'exam' ? 'c-low' : 'c-high');
     $('v-marks-btn').hidden = st.mode === 'exam';
     $('v-jump').hidden = st.mode === 'exam';
+    $('v-audio-btn').hidden = st.mode === 'exam';   // làm đề: thanh audio tự hiện ở phần Listening
     $('v-marks').hidden = true;
     setTool('view');
     banner('Đang mở…');
@@ -131,7 +133,12 @@
           (/iPhone|iPad/.test(navigator.userAgent) && size > 100e6 ? '\n\nFile lớn, iPhone có thể không mở nổi. Nên dùng bản PDF nhỏ hơn nếu có.' : '')),
       });
     } catch (e) {
-      banner(`<span class="bad">Không mở được: ${esc(e.message)}</span>`);
+      // m4-1 (việc tồn 7): token hết hạn ngay lúc mở cũng có nút gia hạn như khi hết hạn giữa chừng.
+      // open() gọi ensureToken() đầu tiên, nên bấm nút là mở được cửa sổ gia hạn.
+      if (e instanceof PdfSource.AuthNeeded) {
+        banner(`<span class="bad">Không mở được: ${esc(e.message)}.</span> <button class="small" id="v-reauth-open">Gia hạn và mở lại</button>`);
+        $('v-reauth-open').onclick = () => { log('Gia hạn token rồi mở lại PDF.'); open(opts); };
+      } else banner(`<span class="bad">Không mở được: ${esc(e.message)}</span>`);
       log(`Mở PDF lỗi (${opts.file.name}): ${e.message}`);
       return;
     }
@@ -144,6 +151,9 @@
       st.page = st.allowed[0];
     } else st.page = Math.min(st.num, pcfg(opts.file.id).lastPage || 1);
     banner('');
+    // m4-1: làm đề phần Listening thì hiện thanh audio của đúng Test (chỉ Phát/Tạm dừng, phát nối Part 1 → 4).
+    const lm = st.mode === 'exam' && /^T(\d)L$/.exec(st.segKey || '');
+    if (lm && window.AudioPlayer && opts.file.book) AudioPlayer.openExam(opts.file.book, Number(lm[1]));
     log(`Mở PDF ${opts.file.name}: ${st.num} trang, chế độ ${st.mode === 'exam' ? 'làm đề ' + st.segKey : 'ôn tập'}, ${st.src.stats.mode === 'range' ? 'lấy từng đoạn' : 'tải cả file'}, ${Math.round(performance.now() - t0)} ms.`);
     const src = st.src;
     await render();
@@ -182,6 +192,7 @@
     if (st.detect) st.detect.cancel = true;
     if (st.src) log(`Đóng PDF ${st.file.name}: đã tải ${PdfSource.mb(st.src.stats.net)} qua mạng, ${PdfSource.mb(st.src.stats.cache)} từ cache, file ${PdfSource.mb(st.src.stats.size)}.`);
     await closeDoc();
+    if (window.AudioPlayer) AudioPlayer.close();
     $('viewer').hidden = true;
     document.body.classList.remove('viewing');
     refreshPicker();
@@ -394,7 +405,7 @@
         <button class="small secondary" data-m="offset">Lưu độ lệch</button>
         <span class="hint">${Number.isInteger(c.offset) ? `Đang lệch ${c.offset} (trang PDF = số in + ${c.offset})` : 'Chưa có độ lệch'}</span></div>
       <div class="row"><button class="small secondary" data-m="detect"${d && d.running ? ' disabled' : ''}>Dò tự động theo tiêu đề</button>
-        ${d && d.running ? '<button class="small secondary" data-m="stop">Dừng</button>' : ''}<span class="hint" id="m-dstat">${esc(d ? d.msg : 'Cần PDF có lớp chữ. Tải gần như cả file, nên làm trên máy tính dùng Wi-Fi.')}</span></div>
+        ${d && d.running ? '<button class="small secondary" data-m="stop">Dừng</button>' : ''}<span class="hint" id="m-dstat">${esc(d ? d.msg : 'Đọc thử 5 trang trước: PDF không có lớp chữ (bản scan) thì dừng ngay. Có chữ thì hỏi rồi dò hết (tải gần như cả file, nên dùng Wi-Fi).')}</span></div>
       ${d && d.result ? detectBox(d.result) : ''}
       ${st.segs.length ? `<table class="mtable"><tr><th>Phần</th><th>Trang PDF</th><th></th></tr>${rows}</table>` : '<p class="hint">Chưa đánh dấu phần nào.</p>'}
       <p class="hint">Mỗi phần kéo dài tới trước trang bắt đầu của phần kế tiếp. Đánh dấu cả Audioscripts, Đáp án, Bài mẫu để chế độ làm đề chặn được, và "Trang khác" cho trang không thuộc phần nào (giới thiệu, quảng cáo) nằm giữa hay cuối sách.</p>`;
@@ -412,7 +423,7 @@
     const c = pcfg(st.file.id);
     const m = b.dataset.m;
     if (m === 'set') { const k = $('m-key').value; c.marks[k] = st.page; setPcfg(st.file.id, c); log(`Đánh dấu ${S.LABEL[k]} bắt đầu trang PDF ${st.page}.`); }
-    if (m === 'del') { delete c.marks[b.dataset.k]; setPcfg(st.file.id, c); }
+    if (m === 'del') { log(`Xóa mốc ${S.LABEL[b.dataset.k]} (trang PDF ${c.marks[b.dataset.k]}).`); delete c.marks[b.dataset.k]; setPcfg(st.file.id, c); }   // m4-1 (việc tồn 3)
     if (m === 'goto') { go(Number(b.dataset.p), 0); }
     if (m === 'offset') {
       const v = $('m-printed').value.trim();
@@ -420,15 +431,7 @@
       else { const n = parseInt(v, 10); if (!Number.isInteger(n)) { flash('Nhập số trang in.'); return; } c.offset = st.page - n; log(`Độ lệch số trang: trang PDF ${st.page} in số ${n}, lệch ${c.offset}.`); }
       setPcfg(st.file.id, c);
     }
-    if (m === 'detect') {
-      // pdf.js đọc chữ của trang thì cũng tải luôn ảnh scan của trang đó, nên dò gần như tải cả file.
-      const s = st.src.stats;
-      const left = Math.max(0, s.size - s.net - s.cache);
-      const phone = /iPhone|iPad|Android/.test(navigator.userAgent);
-      if (!confirm(`Dò tự động đọc chữ của cả ${st.num} trang, nên sẽ tải gần như cả file: khoảng ${PdfSource.mb(left)} nữa ` +
-        `(file ${PdfSource.mb(s.size)}, phần đã có trong cache không tải lại).` + (phone ? '\n\nNên làm trên máy tính dùng Wi-Fi.' : '') + '\n\nTiếp tục?')) return;
-      runDetect(); return;
-    }
+    if (m === 'detect') { runDetect(); return; }
     if (m === 'stop') { if (st.detect) st.detect.cancel = true; return; }
     if (m === 'apply' && st.detect && st.detect.result) {
       const r = st.detect.result;
@@ -441,25 +444,59 @@
     loadSegs(); syncNav(); renderMarks();
   }
 
+  // m4-1 (việc tồn 1): đọc thử 5 trang rải đều trước. Không trang nào có chữ (bản scan như Cam 15) thì dừng ngay, báo "PDF không có
+  // lớp chữ", không tải cả file (14/10: Cam 15 tải 24,8 MB, 253 s, gợi ý 0 phần). Có chữ thì mới hỏi rồi dò hết.
   async function runDetect() {
     const doc = st.doc;
-    const d = st.detect = { running: true, cancel: false, msg: 'Đang dò…', result: null };
+    const d = st.detect = { running: true, cancel: false, msg: 'Đọc thử 5 trang xem PDF có lớp chữ không…', result: null };
     renderMarks();
     const net0 = st.src.stats.net;
     const t0 = performance.now();
-    const pages = [];
-    for (let p = 1; p <= st.num; p++) {
-      if (d.cancel || doc !== st.doc) break;
+    const setMsg = (t) => { d.msg = t; const el = $('m-dstat'); if (el) el.textContent = t; };
+    async function readPage(p) {
       try {
         const pg = await doc.getPage(p);
         const h = pg.getViewport({ scale: 1 }).height;
         const tc = await pg.getTextContent();
         const edges = tc.items.filter((it) => it.str && (it.transform[5] < h * 0.08 || it.transform[5] > h * 0.92)).map((it) => it.str);
-        pages.push({ p, text: tc.items.map((it) => it.str).join(' '), edges });
         if (pg !== st.pageObj) pg.cleanup();
-      } catch (e) { pages.push({ p, text: '' }); }
-      d.msg = `Đang dò trang ${p}/${st.num} · tải thêm ${PdfSource.mb(st.src.stats.net - net0)}`;
-      const el = $('m-dstat'); if (el) el.textContent = d.msg;
+        return { p, text: tc.items.map((it) => it.str).join(' '), edges };
+      } catch (e) { return { p, text: '' }; }
+    }
+    const hasText = (x) => x.text.trim().length > 20;
+    const sample = [...new Set([1, 2, 3, 4, 5].map((k) => Math.max(1, Math.min(st.num, Math.round(st.num * k / 6)))))];
+    const got = new Map();
+    for (const p of sample) {
+      if (d.cancel || doc !== st.doc) break;
+      got.set(p, await readPage(p));
+      setMsg(`Đọc thử trang ${p} (${got.size}/${sample.length}) · tải thêm ${PdfSource.mb(st.src.stats.net - net0)}`);
+    }
+    const sampleText = [...got.values()].filter(hasText).length;
+    if (!d.cancel && doc === st.doc && got.size && !sampleText) {
+      d.running = false; d.result = null;
+      d.msg = `PDF không có lớp chữ: đọc thử ${got.size} trang (${[...got.keys()].join(', ')}), không trang nào có chữ (tải thêm ${PdfSource.mb(st.src.stats.net - net0)}, ` +
+        `${((performance.now() - t0) / 1000).toFixed(1)} giây). Dò tự động không dùng được cho file này, hãy đánh dấu tay.`;
+      log(`Dò tự động ${st.file.name}: ${d.msg}`);
+      if (!$('v-marks').hidden) renderMarks();
+      return;
+    }
+    if (!d.cancel && doc === st.doc) {
+      // pdf.js đọc chữ của trang thì cũng tải luôn ảnh scan của trang đó, nên dò hết gần như tải cả file.
+      const s = st.src.stats;
+      const left = Math.max(0, s.size - s.net - s.cache);
+      const phone = /iPhone|iPad|Android/.test(navigator.userAgent);
+      if (!confirm(`Đọc thử ${got.size} trang: ${sampleText} trang có chữ. Dò tiếp cả ${st.num} trang sẽ tải gần như cả file: khoảng ${PdfSource.mb(left)} nữa ` +
+        `(file ${PdfSource.mb(s.size)}, phần đã có trong cache không tải lại).` + (phone ? '\n\nNên làm trên máy tính dùng Wi-Fi.' : '') + '\n\nTiếp tục?')) {
+        d.running = false; d.msg = `Đã dừng sau khi đọc thử ${got.size} trang (${sampleText} trang có chữ).`;
+        if (!$('v-marks').hidden) renderMarks();
+        return;
+      }
+    }
+    const pages = [];
+    for (let p = 1; p <= st.num; p++) {
+      if (d.cancel || doc !== st.doc) break;
+      pages.push(got.get(p) || await readPage(p));
+      setMsg(`Đang dò trang ${p}/${st.num} · tải thêm ${PdfSource.mb(st.src.stats.net - net0)}`);
     }
     const withText = pages.filter((x) => x.text.trim().length > 20).length;
     d.running = false;
@@ -483,7 +520,16 @@
     if (v === 'zoomin' && st.zoom < ZOOMS.length - 1) { st.zoom++; render(); }
     if (v === 'zoomout' && st.zoom > 0) { st.zoom--; render(); }
     if (v === 'undo') undo();
-    if (v === 'marks' && st.mode !== 'exam') { const p = $('v-marks'); p.hidden = !p.hidden; if (!p.hidden) renderMarks(); }
+    // m4-1 (việc tồn 2): mở khung thì cuộn về đầu, để dòng chọn phần và nút "Đánh dấu" luôn thấy ngay.
+    if (v === 'marks' && st.mode !== 'exam') { const p = $('v-marks'); p.hidden = !p.hidden; if (!p.hidden) { renderMarks(); p.scrollTop = 0; } }
+    if (v === 'audio' && window.AudioPlayer && st.file) {
+      if (AudioPlayer.isOpen()) AudioPlayer.close();
+      else {
+        // Test của trang đang xem (theo khoảng trang đã đánh dấu), không có thì Test 1.
+        const k = S.kindsOf(st.segs, st.page).map((x) => /^T(\d)/.exec(x)).find(Boolean);
+        AudioPlayer.openBook(st.file.book, { test: k ? Number(k[1]) : 1, part: 1 });
+      }
+    }
   }
 
   // ---------- Thẻ "Đề" trên trang chính ----------
@@ -527,6 +573,7 @@
     $('ex-review').disabled = !f || !signedIn;
     $('ex-probe').disabled = !f || !signedIn;
     $('ex-prep').disabled = !f || !signedIn || prepBusy;
+    if ($('ex-audio')) $('ex-audio').disabled = !$('ex-book').value || !signedIn;
     updatePrep(f);
     if (!f) { ss.innerHTML = ''; $('ex-exam').disabled = true; $('ex-hint').textContent = ''; return; }
     const c = pcfg(f.id);
@@ -612,6 +659,7 @@
     $('ex-exam').onclick = () => { const f = selFile(); if (f) open({ file: f, mode: 'exam', segKey: $('ex-seg').value }); };
     $('ex-probe').onclick = probeClick;
     $('ex-prep').onclick = prepClick;
+    if ($('ex-audio')) $('ex-audio').onclick = () => { const b = Number($('ex-book').value); if (b && window.AudioPlayer) AudioPlayer.openBook(b, { test: 1, part: 1 }); };
     $('ex-cache-btn').onclick = () => cacheClick(false);
     $('ex-cache-clear').onclick = () => cacheClick(true);
     refreshPicker();

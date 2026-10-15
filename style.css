@@ -133,6 +133,34 @@ body.viewing { overflow: hidden; }
 .vink .ink-hl { stroke: #ffd400; stroke-opacity: .42; stroke-width: 16; }
 .vink .ink-ul { stroke: #d0021b; stroke-width: 2.4; }
 .vstatus { font-size: 12px; color: var(--muted); padding: 4px 8px; border-top: 1px solid var(--line); background: var(--card); }
+/* m4-1: thanh audio dưới đáy (dùng chung cho trình xem, Thư viện, thẻ Đề) */
+.ap {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; background: var(--card); border-top: 1px solid var(--line);
+  box-shadow: 0 -2px 8px rgba(0,0,0,.12); padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); font-size: 14px;
+}
+.ap[hidden] { display: none; }
+.ap-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0; }
+.ap-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.ap-seek { width: 100%; margin: 4px 0; accent-color: var(--accent); }
+.ap-seek:disabled { opacity: .55; }
+.ap select { font: inherit; font-size: 14px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+.ap label { display: inline-flex; gap: 4px; align-items: center; }
+.ap-msg { font-size: 13px; color: var(--muted); }
+.ap-msg:empty { display: none; }
+.ap-msg[data-kind="err"], .ap-msg[data-kind="auth"] { color: var(--bad); }
+.ap.exam .ap-rv { display: none; }
+#ap-play { min-width: 7.5em; }
+body.ap-on main { padding-bottom: calc(var(--ap-h, 0px) + 16px); }
+body.ap-on .viewer { bottom: var(--ap-h, 0px); padding-bottom: 0; }
+@media (max-width: 560px) {
+  .ap { padding: 4px 8px calc(4px + env(safe-area-inset-bottom)); }
+  .ap-row { gap: 4px; }
+  .ap button.small { padding: 2px 9px; min-height: 32px; font-size: 13px; }
+  #ap-review { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  #ap-review > * { flex-shrink: 0; }
+}
+
 @media (max-width: 560px) {
   /* Điện thoại: mỗi thanh một dòng, dài thì vuốt ngang, để dành chỗ cho trang đề. */
   .vbar { gap: 4px; padding: 4px 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }

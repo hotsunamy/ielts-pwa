@@ -35,8 +35,23 @@ function loadAuth() {
 function saveAuth(a) {
   if (a) localStorage.setItem(AUTH_KEY, JSON.stringify(a));
   else localStorage.removeItem(AUTH_KEY);
+  syncAuthToSW(a);
   renderAuth();
 }
+// m4-1: service worker không đọc được localStorage, nên chép token sang Cache API để nó gắn vào yêu cầu audio gửi Drive
+// (cách 1b, stream). Chỉ nằm trong máy, cùng chỗ với token trong localStorage. Đăng xuất thì xóa.
+const SW_AUTH_CACHE = 'ielts-auth-v1';
+let authSync = Promise.resolve();
+function syncAuthToSW(a = loadAuth()) {
+  if (!window.caches) return authSync;
+  const key = new URL('__auth', location.href).href;
+  authSync = caches.open(SW_AUTH_CACHE)
+    .then((c) => (a && a.token ? c.put(key, new Response(JSON.stringify({ token: a.token, expiresAt: a.expiresAt }), { headers: { 'Content-Type': 'application/json' } })) : c.delete(key)))
+    .catch(() => {});
+  return authSync;
+}
+window.syncAuthToSW = syncAuthToSW;
+window.authSynced = () => authSync;
 function tokenValid(a = loadAuth()) {
   return !!(a && a.token && a.expiresAt > Date.now() + 30_000);
 }
@@ -309,6 +324,7 @@ function init() {
   $('mode').textContent = isStandalone() ? 'Đang chạy dạng app đã cài' : 'Đang chạy trong trình duyệt';
   renderLog();
   handleRedirectReturn();
+  syncAuthToSW();
   renderAuth();
   $('btn-login').onclick = () => (tokenClient ? loginPopup(false) : loginFallback('đăng nhập'));
   $('btn-login-redirect').onclick = loginRedirect;

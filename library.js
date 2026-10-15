@@ -111,7 +111,7 @@
       <div class="fname">${esc(r.name)}<span class="hint">${esc(folder)}</span>${notes.length ? `<span class="hint note${r.ignored || r.conf === 'manual' || r.conf === 'confirmed' || r.isMain !== undefined ? ' done' : ''}">${esc(notes.join('; '))}</span>` : ''}</div>
       <div class="fasg">${esc(assignLabel(r))}${r.isMain ? ' <b>(bản chính)</b>' : ''}</div>
       <span class="badge c-${conf}">${esc(r.ignored ? 'bỏ qua' : CONF_LABEL[conf] || conf)}</span>
-      <span class="btns">${r.kind === 'pdf' && !r.ignored ? `<button class="small" data-act="open" data-id="${esc(r.id)}">Mở</button> ` : ''}<button class="small secondary" data-act="edit" data-id="${esc(r.id)}">Sửa</button></span>
+      <span class="btns">${r.kind === 'pdf' && !r.ignored ? `<button class="small" data-act="open" data-id="${esc(r.id)}">Mở</button> ` : ''}${r.kind === 'audio' && !r.ignored && r.book && r.test ? `<button class="small" data-act="listen" data-id="${esc(r.id)}">Nghe</button> ` : ''}<button class="small secondary" data-act="edit" data-id="${esc(r.id)}">Sửa</button></span>
     </div>`;
   }
 
@@ -234,6 +234,7 @@
     const act = btn.dataset.act, id = btn.dataset.id;
     const r = results.find((x) => x.id === id);
     if (act === 'open') { if (window.Viewer) Viewer.open({ file: r, mode: 'review' }); return; }
+    if (act === 'listen') { if (window.AudioPlayer) AudioPlayer.openFile(r); return; }   // m4-1: nghe thử (vd track CD)
     if (act === 'edit') { editing = id; render(); return; }
     if (act === 'cancel') { editing = null; render(); return; }
     if (act === 'save') {
