@@ -175,3 +175,55 @@ body.ap-on .viewer { bottom: var(--ap-h, 0px); padding-bottom: 0; }
   .vstatus.full { white-space: normal; }
   .vscroll { padding: 4px; }
 }
+
+/* m5-1: khung bên trình xem (phiếu trả lời, nhập đáp án, kết quả). Máy tính: cột phải. Điện thoại: dải dưới đáy. */
+.vmain { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vmain > .vscroll { flex: 1; min-height: 0; }
+.vside { background: var(--card); border-top: 1px solid var(--line); display: flex; flex-direction: column; max-height: 50vh; min-height: 0; font-size: 14px; }
+.vside[hidden] { display: none; }
+.vside.collapsed .vs-body { display: none; }
+.vs-head { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.vs-title { flex: 1; min-width: 0; }
+.vs-head select { font: inherit; font-size: 14px; padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+.vs-body { overflow-y: auto; padding: 6px 10px 10px; -webkit-overflow-scrolling: touch; }
+.vside input.qin, .vside input.kin, .vside input.rkin, .vside textarea, .vside #ak-groups {
+  font: inherit; font-size: 16px; /* >= 16px: iPhone không tự phóng to khi gõ */
+  padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); min-width: 0;
+}
+.vside textarea { width: 100%; font-size: 15px; }
+.qblock { border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px 6px; margin: 6px 0; }
+.qblock.cur { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent) inset; }
+.qblock.done { border-color: var(--ok); }
+.qbh { font-weight: 600; font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.qgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 4px 8px; }
+.qrow { display: flex; align-items: center; gap: 4px; }
+.qrow input { flex: 1; width: 100%; }
+.qn { display: inline-block; min-width: 1.8em; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
+.krow { display: grid; grid-template-columns: auto 1fr; gap: 2px 6px; align-items: center; padding: 1px 0; }
+.krow .kw { grid-column: 2; color: var(--bad); font-size: 12px; }
+.krow.flag input { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, var(--bg)); }
+.kchk { font-weight: 400; display: inline-flex; gap: 4px; align-items: center; }
+.kpaste { margin: 6px 0; }
+.kgroups label { display: inline-flex; gap: 6px; align-items: center; }
+.rscore { font-size: 18px; margin: 4px 0; }
+.rtable { border-collapse: collapse; width: 100%; }
+.rtable td { border-top: 1px solid var(--line); padding: 4px; vertical-align: top; }
+.rtable td.rbtn { text-align: right; }
+.rtable .redit { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
+.rtable .redit[hidden] { display: none; }
+#ex-results ul { margin: 6px 0; }
+.amodal { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; padding: 16px; }
+.amodal[hidden] { display: none; }
+.amodal-box { background: var(--card); border-radius: 12px; width: min(640px, 100%); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; }
+@media (min-width: 761px) {
+  .vmain { flex-direction: row; }
+  .vside { width: 340px; max-height: none; border-top: 0; border-left: 1px solid var(--line); }
+  .vside.collapsed { width: auto; }
+  .vside.collapsed .vs-head { flex-direction: column; align-items: stretch; border-bottom: 0; }
+  .vside.collapsed .vs-head select { display: none; }
+}
+@media (max-width: 760px) {
+  .vside { max-height: 46vh; }
+  .vside.collapsed { max-height: none; }
+  .qgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

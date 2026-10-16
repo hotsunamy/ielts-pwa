@@ -49,10 +49,14 @@
     <button class="small secondary" data-v="undo">Hoàn tác</button>
     <button class="small secondary" data-v="marks" id="v-marks-btn">Đánh dấu trang</button>
     <button class="small secondary" data-v="audio" id="v-audio-btn">Audio</button>
+    <button class="small secondary" data-v="keys" id="v-keys-btn">Đáp án</button>
   </div>
   <div id="v-banner"></div>
   <div id="v-marks" class="vpanel" hidden></div>
-  <div id="v-scroll" class="vscroll"><div id="v-box" class="vbox"><svg id="v-ink" class="vink" preserveAspectRatio="none"></svg></div></div>
+  <div class="vmain">
+    <div id="v-scroll" class="vscroll"><div id="v-box" class="vbox"><svg id="v-ink" class="vink" preserveAspectRatio="none"></svg></div></div>
+    <div id="v-side" class="vside" hidden></div>
+  </div>
   <div id="v-status" class="vstatus"></div>
 </div>`);
     const v = $('viewer');
@@ -67,12 +71,20 @@
     ink.addEventListener('pointerup', inkUp);
     ink.addEventListener('pointercancel', inkUp);
     window.addEventListener('keydown', (e) => {
-      if ($('viewer').hidden || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+      if ($('viewer').hidden || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
       if (e.key === 'ArrowRight' || e.key === 'PageDown') { go(st.page, +1); e.preventDefault(); }
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') { go(st.page, -1); e.preventDefault(); }
     });
     let rt = null;
     window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { if (st.doc && !$('viewer').hidden) render(); }, 250); });
+    // m5-1: khung phiếu trả lời / đáp án mở, đóng, thu gọn làm khung trang PDF đổi bề ngang: vẽ lại cho vừa.
+    if (window.ResizeObserver) {
+      let ro = null;
+      new ResizeObserver(() => { clearTimeout(ro); ro = setTimeout(() => {
+        if (st.doc && !$('viewer').hidden && st.renderedW && Math.abs($('v-scroll').clientWidth - st.renderedW) > 4) render();
+      }, 150); }).observe($('v-scroll'));
+    }
+    if (window.Answers) Answers.bind();
   }
 
   function banner(html) { $('v-banner').innerHTML = html ? `<div class="vbanner">${html}</div>` : ''; }
@@ -90,7 +102,7 @@
   }
 
   // ---------- Mở / đóng ----------
-  // opts: {file: {id, name, size, book}, mode: 'review'|'exam', segKey}
+  // opts: {file: {id, name, size, book}, mode: 'review'|'exam', segKey, page (ôn tập: mở ở trang này), panel: {kind: 'key', seg} (m5-1)}
   async function open(opts) {
     const wait = window.ensureToken();   // gọi trước mọi await để cửa sổ gia hạn không bị chặn
     buildDom();
@@ -105,6 +117,8 @@
     $('v-marks-btn').hidden = st.mode === 'exam';
     $('v-jump').hidden = st.mode === 'exam';
     $('v-audio-btn').hidden = st.mode === 'exam';   // làm đề: thanh audio tự hiện ở phần Listening
+    $('v-keys-btn').hidden = st.mode === 'exam';    // m5-1: làm đề thì khung bên là phiếu trả lời
+    if (window.Answers) { Answers.bind(); Answers.onClose(); }
     $('v-marks').hidden = true;
     setTool('view');
     banner('Đang mở…');
@@ -112,7 +126,7 @@
     const t0 = performance.now();
     // Trang sẽ hiện đầu tiên (để tải trước đúng trang đó trong lúc pdf.js mở tài liệu).
     const c0 = pcfg(opts.file.id);
-    const startPage = st.mode === 'exam' ? (c0.marks[st.segKey] || 1) : (c0.lastPage || 1);
+    const startPage = st.mode === 'exam' ? (c0.marks[st.segKey] || 1) : (opts.page || c0.lastPage || 1);
     let tokenMs = 0;
     try {
       await wait;
@@ -149,8 +163,10 @@
     if (st.mode === 'exam') {
       if (!st.allowed.length) { banner('<span class="bad">Phần này chưa có khoảng trang. Mở ôn tập rồi đánh dấu trang trước.</span>'); return; }
       st.page = st.allowed[0];
-    } else st.page = Math.min(st.num, pcfg(opts.file.id).lastPage || 1);
+    } else st.page = Math.min(st.num, opts.page || pcfg(opts.file.id).lastPage || 1);
     banner('');
+    // m5-1: phiếu trả lời (làm đề Listening/Reading) hoặc khung nhập đáp án (ôn tập, khi được yêu cầu).
+    if (window.Answers) Answers.onOpen({ file: opts.file, mode: st.mode, segKey: st.segKey, panel: opts.panel || null });
     // m4-1: làm đề phần Listening thì hiện thanh audio của đúng Test (chỉ Phát/Tạm dừng, phát nối Part 1 → 4).
     const lm = st.mode === 'exam' && /^T(\d)L$/.exec(st.segKey || '');
     if (lm && window.AudioPlayer && opts.file.book) AudioPlayer.openExam(opts.file.book, Number(lm[1]));
@@ -187,8 +203,14 @@
     if (c) { c.width = 0; c.height = 0; c.remove(); }
   }
 
-  async function close() {
-    if (st.mode === 'exam' && st.doc && !confirm('Thoát bài đang làm?')) return;
+  // force: đóng không hỏi (vd bài đã nộp, chuyển sang xem trang đáp án).
+  async function close(force) {
+    if (!force && st.mode === 'exam' && st.doc) {
+      const qseg = /^T[1-4][LR]$/.test(st.segKey || '') && window.Answers;
+      if (!qseg && !confirm('Thoát bài đang làm?')) return;
+      if (qseg && Answers.blocksClose() && !confirm('Thoát bài đang làm? Các ô đã điền vẫn được giữ trong máy, mở lại phần này sẽ làm tiếp.')) return;
+    }
+    if (window.Answers) Answers.onClose();
     if (st.detect) st.detect.cancel = true;
     if (st.src) log(`Đóng PDF ${st.file.name}: đã tải ${PdfSource.mb(st.src.stats.net)} qua mạng, ${PdfSource.mb(st.src.stats.cache)} từ cache, file ${PdfSource.mb(st.src.stats.size)}.`);
     await closeDoc();
@@ -275,6 +297,7 @@
     const old = box.querySelector('canvas');
     if (old) { old.width = 0; old.height = 0; old.remove(); }
     box.style.width = cssW + 'px'; box.style.height = cssH + 'px';
+    st.renderedW = $('v-scroll').clientWidth;
     box.insertBefore(canvas, $('v-ink'));
     if (st.pageObj && st.pageObj !== page) { try { st.pageObj.cleanup(); } catch (_) {} }
     st.pageObj = page;
@@ -522,6 +545,7 @@
     if (v === 'undo') undo();
     // m4-1 (việc tồn 2): mở khung thì cuộn về đầu, để dòng chọn phần và nút "Đánh dấu" luôn thấy ngay.
     if (v === 'marks' && st.mode !== 'exam') { const p = $('v-marks'); p.hidden = !p.hidden; if (!p.hidden) { renderMarks(); p.scrollTop = 0; } }
+    if (v === 'keys' && window.Answers && st.mode !== 'exam') Answers.toggleKeys();
     if (v === 'audio' && window.AudioPlayer && st.file) {
       if (AudioPlayer.isOpen()) AudioPlayer.close();
       else {
@@ -575,6 +599,8 @@
     $('ex-prep').disabled = !f || !signedIn || prepBusy;
     if ($('ex-audio')) $('ex-audio').disabled = !$('ex-book').value || !signedIn;
     updatePrep(f);
+    if ($('ex-keys')) $('ex-keys').disabled = !f || !signedIn;
+    if (window.Answers) Answers.refreshCard();
     if (!f) { ss.innerHTML = ''; $('ex-exam').disabled = true; $('ex-hint').textContent = ''; return; }
     const c = pcfg(f.id);
     const keys = S.KEYS.filter((k) => S.isTestKey(k) && c.marks[k] != null);
@@ -665,6 +691,9 @@
     refreshPicker();
   }
 
-  window.Viewer = { open, close, refreshPicker, _st: st };
+  // m5-1: answers.js đọc tài liệu và trang đang xem (nút "Lấy chữ trang PDF này"), mở/đóng trình xem.
+  const ctx = () => ({ doc: st.doc, page: st.page, file: st.file, mode: st.mode, segKey: st.segKey, segs: st.segs });
+  const isOpen = () => !!$('viewer') && !$('viewer').hidden;
+  window.Viewer = { open, close, refreshPicker, ctx, isOpen, selFile, _st: st };
   init();
 })();
