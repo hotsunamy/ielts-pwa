@@ -15,7 +15,11 @@
   const st = {
     file: null, src: null, doc: null, num: 0, page: 1, zoom: 0, mode: 'review', segKey: null,
     segs: [], allowed: [], tool: 'view', seq: 0, task: null, pageObj: null, ink: null, H: 1414, drawing: null, detect: null,
+    style: 'mock',     // m5-2: làm đề kiểu 'mock' (Thi thử: giờ, không dừng tay) hoặc 'practice' (Luyện: có phiếu và chấm, dừng/tua tự do)
+    pen: false, pan: null,   // m5-2 mục 3.8: đã thấy bút (Apple Pencil) thì lớp vẽ chỉ nhận nét bút, ngón tay để cuộn
   };
+  const PEN_KEY = 'ielts.pen';
+  const STYLE = { mock: 'Thi thử', practice: 'Luyện' };
 
   // ---------- Lưu trong máy ----------
   function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (_) { return d; } }
@@ -56,6 +60,7 @@
   <div class="vmain">
     <div id="v-scroll" class="vscroll"><div id="v-box" class="vbox"><svg id="v-ink" class="vink" preserveAspectRatio="none"></svg></div></div>
     <div id="v-side" class="vside" hidden></div>
+    <div id="v-cover" class="vcover" hidden></div>
   </div>
   <div id="v-status" class="vstatus"></div>
 </div>`);
@@ -107,12 +112,13 @@
     const wait = window.ensureToken();   // gọi trước mọi await để cửa sổ gia hạn không bị chặn
     buildDom();
     await closeDoc();
-    Object.assign(st, { file: opts.file, mode: opts.mode || 'review', segKey: opts.segKey || null, tool: 'view', zoom: 0, page: 1, lastRender: null, inkKB: null });
+    Object.assign(st, { file: opts.file, mode: opts.mode || 'review', segKey: opts.segKey || null, tool: 'view', zoom: 0, page: 1, lastRender: null, inkKB: null,
+      style: opts.style === 'practice' ? 'practice' : 'mock' });
     $('viewer').hidden = false;
     document.body.classList.add('viewing');
     $('v-title').textContent = (opts.file.book ? `Cam ${opts.file.book} · ` : '') + (st.mode === 'exam' ? S.LABEL[st.segKey] : opts.file.name);
     $('v-sub').textContent = st.mode === 'exam' ? opts.file.name : '';
-    $('v-mode').textContent = st.mode === 'exam' ? 'Làm đề' : 'Ôn tập';
+    $('v-mode').textContent = st.mode === 'exam' ? STYLE[st.style] : 'Ôn tập';
     $('v-mode').className = 'badge ' + (st.mode === 'exam' ? 'c-low' : 'c-high');
     $('v-marks-btn').hidden = st.mode === 'exam';
     $('v-jump').hidden = st.mode === 'exam';
@@ -165,12 +171,14 @@
       st.page = st.allowed[0];
     } else st.page = Math.min(st.num, opts.page || pcfg(opts.file.id).lastPage || 1);
     banner('');
-    // m5-1: phiếu trả lời (làm đề Listening/Reading) hoặc khung nhập đáp án (ôn tập, khi được yêu cầu).
-    if (window.Answers) Answers.onOpen({ file: opts.file, mode: st.mode, segKey: st.segKey, panel: opts.panel || null });
-    // m4-1: làm đề phần Listening thì hiện thanh audio của đúng Test (chỉ Phát/Tạm dừng, phát nối Part 1 → 4).
+    // m4-1: làm đề phần Listening thì hiện thanh audio của đúng Test. Thi thử: chỉ Phát, không tua, không tạm dừng tay, phát nối
+    // Part 1 → 4. Luyện (m5-2): thanh ôn tập khóa vào Test đó (dừng, tua, tốc độ), hết Part tự sang Part sau.
+    // Mở audio trước phiếu trả lời (m5-2): phiếu cần thanh audio để nghe tiếp đúng chỗ khi mở lại bài làm dở.
     const lm = st.mode === 'exam' && /^T(\d)L$/.exec(st.segKey || '');
-    if (lm && window.AudioPlayer && opts.file.book) AudioPlayer.openExam(opts.file.book, Number(lm[1]));
-    log(`Mở PDF ${opts.file.name}: ${st.num} trang, chế độ ${st.mode === 'exam' ? 'làm đề ' + st.segKey : 'ôn tập'}, ${st.src.stats.mode === 'range' ? 'lấy từng đoạn' : 'tải cả file'}, ${Math.round(performance.now() - t0)} ms.`);
+    if (lm && window.AudioPlayer && opts.file.book) { if (st.style === 'practice') AudioPlayer.openPractice(opts.file.book, Number(lm[1])); else AudioPlayer.openExam(opts.file.book, Number(lm[1])); }
+    // m5-1: phiếu trả lời / bài viết (làm đề) hoặc khung nhập đáp án (ôn tập, khi được yêu cầu).
+    if (window.Answers) Answers.onOpen({ file: opts.file, mode: st.mode, style: st.style, segKey: st.segKey, panel: opts.panel || null });
+    log(`Mở PDF ${opts.file.name}: ${st.num} trang, chế độ ${st.mode === 'exam' ? `${STYLE[st.style].toLowerCase()} ${st.segKey}` : 'ôn tập'}, ${st.src.stats.mode === 'range' ? 'lấy từng đoạn' : 'tải cả file'}, ${Math.round(performance.now() - t0)} ms.`);
     const src = st.src;
     await render();
     if (st.src !== src) return;
@@ -206,9 +214,9 @@
   // force: đóng không hỏi (vd bài đã nộp, chuyển sang xem trang đáp án).
   async function close(force) {
     if (!force && st.mode === 'exam' && st.doc) {
-      const qseg = /^T[1-4][LR]$/.test(st.segKey || '') && window.Answers;
+      const qseg = /^T[1-4][LRW]$/.test(st.segKey || '') && window.Answers;
       if (!qseg && !confirm('Thoát bài đang làm?')) return;
-      if (qseg && Answers.blocksClose() && !confirm('Thoát bài đang làm? Các ô đã điền vẫn được giữ trong máy, mở lại phần này sẽ làm tiếp.')) return;
+      if (qseg && Answers.blocksClose() && !confirm('Thoát bài đang làm? Đồng hồ dừng lại, phần đã làm vẫn được giữ trong máy. Mở lại phần này sẽ hỏi làm tiếp hay bỏ.')) return;
     }
     if (window.Answers) Answers.onClose();
     if (st.detect) st.detect.cancel = true;
@@ -249,10 +257,10 @@
   }
 
   let flashT = null;
-  function flash(msg) {
+  function flash(msg, ms = 2500) {
     banner(`<span class="warn">${esc(msg)}</span>`);
     clearTimeout(flashT);
-    flashT = setTimeout(() => { if ($('v-banner').textContent === msg) banner(''); }, 2500);   // không xóa thông báo khác (vd token hết hạn)
+    flashT = setTimeout(() => { if ($('v-banner').textContent === msg) banner(''); }, ms);   // không xóa thông báo khác (vd token hết hạn)
   }
 
   function syncNav() {
@@ -307,6 +315,7 @@
     drawInk();
     status();
     if (st.mode === 'review') { const c = pcfg(st.file.id); c.lastPage = n; setPcfg(st.file.id, c); }
+    if (st.mode === 'review' && window.Answers && Answers.onPage) Answers.onPage(n);   // m5-2: nhớ trang đáp án theo phần
     prefetch(n);
   }
 
@@ -348,13 +357,34 @@
   }
   function inkDown(e) {
     if (st.tool === 'view' || !st.doc) return;
+    // m5-2 mục 3.8 (iPad): lần đầu thấy nét bút thì bật chế độ bút; từ đó ngón tay (và lòng bàn tay) không vẽ, chỉ cuộn trang.
+    if (e.pointerType === 'pen' && !st.pen) {
+      st.pen = true; saveJSON(PEN_KEY, true);
+      log('Lớp vẽ: phát hiện bút, từ giờ chỉ nhận nét bút; ngón tay dùng để cuộn trang.');
+      flash('Đã thấy bút: chỉ bút vẽ được, ngón tay để cuộn.', 4000);
+    }
+    if (st.pen && e.pointerType === 'touch') {
+      e.preventDefault();
+      if (st.pan) return;
+      const sc = $('v-scroll');
+      st.pan = { id: e.pointerId, x: e.clientX, y: e.clientY, l: sc.scrollLeft, t: sc.scrollTop };
+      try { $('v-ink').setPointerCapture(e.pointerId); } catch (_) {}
+      return;
+    }
     e.preventDefault();
-    $('v-ink').setPointerCapture(e.pointerId);
+    try { $('v-ink').setPointerCapture(e.pointerId); } catch (_) {}
     st.drawing = { t: st.tool, pts: [inkPt(e)], id: e.pointerId };
     if (st.tool === 'erase') eraseAt(st.drawing.pts[0]);
     else { const live = $('v-live'); live.setAttribute('class', 'ink-' + st.tool); }
   }
   function inkMove(e) {
+    if (st.pan && e.pointerId === st.pan.id) {
+      e.preventDefault();
+      const sc = $('v-scroll');
+      sc.scrollLeft = st.pan.l - (e.clientX - st.pan.x);
+      sc.scrollTop = st.pan.t - (e.clientY - st.pan.y);
+      return;
+    }
     const d = st.drawing;
     if (!d || e.pointerId !== d.id) return;
     e.preventDefault();
@@ -369,6 +399,7 @@
     if (d.t !== 'erase') $('v-live').setAttribute('points', d.pts.map((q) => q.join(',')).join(' '));
   }
   function inkUp(e) {
+    if (st.pan && e.pointerId === st.pan.id) { st.pan = null; return; }
     const d = st.drawing;
     if (!d || e.pointerId !== d.id) return;
     st.drawing = null;
@@ -601,15 +632,33 @@
     updatePrep(f);
     if ($('ex-keys')) $('ex-keys').disabled = !f || !signedIn;
     if (window.Answers) Answers.refreshCard();
-    if (!f) { ss.innerHTML = ''; $('ex-exam').disabled = true; $('ex-hint').textContent = ''; return; }
+    if (!f) { ss.innerHTML = ''; $('ex-exam').disabled = true; if ($('ex-practice')) $('ex-practice').disabled = true; $('ex-hint').textContent = ''; return; }
     const c = pcfg(f.id);
     const keys = S.KEYS.filter((k) => S.isTestKey(k) && c.marks[k] != null);
     ss.innerHTML = keys.map((k) => `<option value="${k}">${esc(S.LABEL[k])}</option>`).join('');
     $('ex-exam').disabled = !keys.length || !signedIn || f.scope === 'key';
-    const blocked = ['AS', 'KEY', 'SAMPLE'].filter((k) => c.marks[k] != null).map((k) => S.LABEL[k]);
-    $('ex-hint').textContent = f.scope === 'key' ? 'File key chỉ mở ở chế độ ôn tập.' :
-      !keys.length ? 'Chưa đánh dấu trang cho PDF này. Bấm "Mở ôn tập" rồi "Đánh dấu trang".' :
-      `Đã đánh dấu ${Object.keys(c.marks).length} phần. Chặn khi làm đề: ${blocked.join(', ') || 'chưa đánh dấu phần nào cần chặn (Audioscripts, Đáp án, Bài mẫu)'}.`;
+    if ($('ex-practice')) $('ex-practice').disabled = $('ex-exam').disabled;
+    $('ex-hint').innerHTML = f.scope === 'key' ? 'File key chỉ mở ở chế độ ôn tập.' : marksSummary(c.marks, !keys.length);
+  }
+  // m5-2 mục 3.6: "Đã đánh dấu 7/20 phần. Chưa có: Test 1 Reading; Test 3, Test 4 (cả 4 kỹ năng); Bài mẫu Writing; Phiếu trả lời mẫu."
+  // 20 phần = 4 Test × 4 kỹ năng + Audioscripts + Đáp án + Bài mẫu + Phiếu. Bấm vào thì bung danh sách đầy đủ.
+  function marksSummary(marks, none) {
+    const ALL = S.KEYS.filter((k) => k !== 'OTHER');
+    const have = ALL.filter((k) => marks[k] != null);
+    const SK = { L: 'Listening', R: 'Reading', W: 'Writing', S: 'Speaking' };
+    const part = [], whole = [];
+    for (let t = 1; t <= 4; t++) {
+      const miss = 'LRWS'.split('').filter((x) => marks[`T${t}${x}`] == null);
+      if (miss.length === 4) whole.push(`Test ${t}`);
+      else if (miss.length) part.push(`Test ${t} ${miss.map((x) => SK[x]).join(', ')}`);
+    }
+    const other = ['AS', 'KEY', 'SAMPLE', 'SHEET'].filter((k) => marks[k] == null).map((k) => S.LABEL[k]);
+    const miss = [...part, ...(whole.length ? [`${whole.join(', ')} (cả 4 kỹ năng)`] : []), ...other];
+    const blocked = ['AS', 'KEY', 'SAMPLE'].filter((k) => marks[k] != null).map((k) => S.LABEL[k]);
+    const line = `Đã đánh dấu ${have.length}/${ALL.length} phần.${miss.length ? ` Chưa có: ${miss.join('; ')}.` : ' Đủ cả.'}`;
+    const rows = ALL.map((k) => `<li>${esc(S.LABEL[k])}: ${marks[k] != null ? `trang ${marks[k]}` : '<span class="warn">chưa</span>'}</li>`).join('');
+    return `<details class="mlist"><summary>${esc(line)}</summary><ul class="plain">${rows}</ul></details>` +
+      (none ? 'Chưa đánh dấu phần nào của Test. Bấm "Mở ôn tập" rồi "Đánh dấu trang".' : `Chặn khi làm đề: ${esc(blocked.join(', ') || 'chưa đánh dấu phần nào cần chặn (Audioscripts, Đáp án, Bài mẫu)')}.`);
   }
   // ---------- Nút "Chuẩn bị quyển này" (m3-3) ----------
   // Tải sẵn vào cache phần cấu trúc PDF (đầu, đuôi, xref, object stream/object nhỏ, cây trang) để lần mở đầu chỉ còn
@@ -682,7 +731,15 @@
     $('ex-book').onchange = pickBook;
     $('ex-pdf').onchange = pickPdf;
     $('ex-review').onclick = () => { const f = selFile(); if (f) open({ file: f, mode: 'review' }); };
-    $('ex-exam').onclick = () => { const f = selFile(); if (f) open({ file: f, mode: 'exam', segKey: $('ex-seg').value }); };
+    // m5-2: Thi thử (giờ, không dừng tay) và Luyện (có phiếu và chấm, dừng/tua tự do).
+    const start = (style) => {
+      const f = selFile(); if (!f) return;
+      const seg = $('ex-seg').value;
+      if (window.Answers && Answers.preflight && !Answers.preflight(f.book, seg, style)) return;
+      open({ file: f, mode: 'exam', segKey: seg, style });
+    };
+    $('ex-exam').onclick = () => start('mock');
+    if ($('ex-practice')) $('ex-practice').onclick = () => start('practice');
     $('ex-probe').onclick = probeClick;
     $('ex-prep').onclick = prepClick;
     if ($('ex-audio')) $('ex-audio').onclick = () => { const b = Number($('ex-book').value); if (b && window.AudioPlayer) AudioPlayer.openBook(b, { test: 1, part: 1 }); };
@@ -692,8 +749,10 @@
   }
 
   // m5-1: answers.js đọc tài liệu và trang đang xem (nút "Lấy chữ trang PDF này"), mở/đóng trình xem.
-  const ctx = () => ({ doc: st.doc, page: st.page, file: st.file, mode: st.mode, segKey: st.segKey, segs: st.segs });
+  const ctx = () => ({ doc: st.doc, page: st.page, file: st.file, mode: st.mode, style: st.style, segKey: st.segKey, segs: st.segs });
   const isOpen = () => !!$('viewer') && !$('viewer').hidden;
-  window.Viewer = { open, close, refreshPicker, ctx, isOpen, selFile, _st: st };
+  const goPage = (n) => go(n, 0);
+  st.pen = loadJSON(PEN_KEY, false) === true;
+  window.Viewer = { open, close, refreshPicker, ctx, isOpen, selFile, goPage, flash, _st: st };
   init();
 })();

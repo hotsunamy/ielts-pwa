@@ -39,7 +39,10 @@
     pending: null, unlocked: false, wasPlaying: false,
     src: null, srcT: 0,                // m4-3: ai vừa bấm Phát/Tạm dừng ('app' | 'màn hình khóa'), để ghi nhật ký
     hidePaused: null,                  // m4-4: vị trí (giây) app tự tạm dừng do rời app; null = không
+    practice: false,                   // m5-2: Luyện Listening: thanh ôn tập (tua, tốc độ, dừng) khóa vào 1 Test, hết Part tự sang Part sau
   };
+  // m5-2: báo cho phiếu trả lời (answers.js) khi bấm Phát (để chạy tiếp đồng hồ đang dừng) và khi phát hết Test (sang 10 phút chép).
+  const hook = (name, ...args) => { try { if (window.Answers && Answers[name]) Answers[name](...args); } catch (e) { log('Lỗi ' + name + ': ' + e.message); } };
   const isHidden = () => document.visibilityState === 'hidden';
   const blobs = new Map();   // fileId -> {url, size}
 
@@ -121,16 +124,50 @@
   function openBook(book, opts = {}) {
     buildDom();
     stop('đổi');
-    Object.assign(st, { open: true, mode: 'review', book, data: bookAudio(book), test: opts.test || 1, part: opts.part || 1, list: [], idx: 0 });
+    Object.assign(st, { open: true, mode: 'review', book, data: bookAudio(book), test: opts.test || 1, part: opts.part || 1, list: [], idx: 0, practice: !!opts.practice });
     show();
     setCur(st.test, st.part);
     if (opts.autoplay) playClick();
+  }
+  // m5-2: Luyện Listening Test t: được dừng, tua, đổi tốc độ, lặp A-B; chỉ trong Test này; hết Part tự phát Part sau.
+  function openPractice(book, test) {
+    openBook(book, { test, part: 1, practice: true });
+    const d = st.data;
+    const miss = d.byTest ? (d.get(test) ? [] : ['cả Test']) : [1, 2, 3, 4].filter((p) => !d.get(test, p)).map((p) => `Part ${p}`);
+    if (d.none) note(`Cam ${book} chưa có file audio nào trong thư viện. Luyện phần này không có audio.`, 'info');
+    else if (miss.length) note(`Luyện: Test ${test} thiếu audio ${miss.join(', ')}. Phần có audio vẫn nghe được.`, 'info');
+    else note('Luyện: được dừng, tua, đổi tốc độ. Hết Part tự sang Part sau.', 'hint');
+  }
+  // m5-2: sau khi nộp bài Listening thi thử, chuyển thanh audio sang ôn tập (tua, tốc độ, A-B) ở đúng Test và Part đang nghe.
+  function toReview() {
+    if (!st.open || st.mode !== 'exam') return;
+    const part = (st.list[st.idx] && st.list[st.idx].part) || 1;
+    openPractice(st.book, st.test);
+    if (part > 1 && !st.data.byTest) { $('ap-part').value = part; pick(st.test, part); }
+    note('Đã nộp bài: thanh audio chuyển sang ôn tập (tua, tốc độ, lặp A-B) để soát lại.', 'hint');
+    log(`Audio: đã nộp bài, chuyển sang ôn tập Cam ${st.book} Test ${st.test}.`);
+  }
+  // m5-2: vị trí đang nghe khi làm đề (để mở lại app thì nghe tiếp đúng chỗ), và đặt lại vị trí đó.
+  function examPos() {
+    if (!st.open || st.mode !== 'exam') return null;
+    const a = audio();
+    if (!st.loaded && !st.resumeAt) return null;   // chưa nghe gì
+    const t = st.loaded ? (st.hidePaused != null ? st.hidePaused : a.currentTime || 0) : (st.resumeAt || 0);
+    return { idx: st.idx, t: Math.round(t * 10) / 10 };
+  }
+  function examStartAt(pos) {
+    if (!pos || !st.open || st.mode !== 'exam') return;
+    const it = st.list[pos.idx];
+    if (!it || !it.file) return;
+    if (pos.idx !== st.idx) { st.idx = pos.idx; setCur(st.test, it.part, it.file, true); }
+    st.resumeAt = pos.t || 0;
+    note(`Bài đang làm dở: bấm Tiếp tục hoặc Phát để nghe tiếp từ ${fmt(st.resumeAt)}${it.part ? ` (Part ${it.part})` : ''}.`, 'info');
   }
   // Nghe một file từ Thư viện (để nghe thử track CD, kiểm cách gắn).
   function openFile(r) {
     buildDom();
     stop('đổi');
-    Object.assign(st, { open: true, mode: 'review', book: r.book, data: bookAudio(r.book), test: r.test || 1, part: r.part || 1, list: [], idx: 0 });
+    Object.assign(st, { open: true, mode: 'review', book: r.book, data: bookAudio(r.book), test: r.test || 1, part: r.part || 1, list: [], idx: 0, practice: false });
     show();
     setCur(st.test, st.part, r);
     playClick();
@@ -143,7 +180,7 @@
     const list = [];
     if (data.byTest) list.push({ test, part: null, file: data.get(test) });
     else for (let p = 1; p <= 4; p++) list.push({ test, part: p, file: data.get(test, p) });
-    Object.assign(st, { open: true, mode: 'exam', book, data, test, part: 1, list, idx: 0 });
+    Object.assign(st, { open: true, mode: 'exam', book, data, test, part: 1, list, idx: 0, practice: false });
     show();
     const have = list.filter((x) => x.file);
     const first = list.findIndex((x) => x.file);
@@ -153,7 +190,7 @@
     if (data.none) note(`Cam ${book} chưa có file audio nào trong thư viện. Phần Listening này làm không có audio.`, 'info');
     else if (!have.length) note(`Test ${test} chưa có audio (${miss.join(', ')}).`, 'info');
     else if (miss.length) note(`Test ${test} thiếu audio ${miss.join(', ')}: chỉ phát được phần có.`, 'info');
-    else note('Làm đề: chỉ Phát và Tạm dừng, không tua. Bấm Phát khi sẵn sàng.', 'hint');
+    else note('Thi thử: không tua, không có nút tạm dừng (rời app thì tự dừng). Bấm Phát khi sẵn sàng.', 'hint');
   }
   function show() {
     const box = $('ap');
@@ -162,7 +199,8 @@
     document.body.classList.add('ap-on');
     $('ap-badge').textContent = st.mode === 'exam' ? 'Làm đề' : 'Ôn tập';
     $('ap-badge').className = 'badge ' + (st.mode === 'exam' ? 'c-low' : 'c-high');
-    $('ap-close').hidden = st.mode === 'exam';
+    $('ap-close').hidden = st.mode === 'exam' || st.practice;
+    $('ap-test').closest('label').hidden = st.practice;   // Luyện: khóa vào Test đang làm
     $('ap-seek').disabled = st.mode === 'exam';
     const a = audio();
     if (st.mode === 'exam') { a.defaultPlaybackRate = 1; a.playbackRate = 1; }
@@ -290,7 +328,10 @@
     const a = audio();
     if (!st.cur || !st.cur.file) return;
     st.src = 'app'; st.srcT = performance.now();
+    // m5-2 (Minh chốt 16/10): thi thử không có nút tạm dừng. Muốn dừng thì rời app (khóa màn hình, chuyển app/tab): app tự dừng audio và đồng hồ.
+    if (st.mode === 'exam' && st.loaded && !a.paused) { note('Thi thử: không có nút tạm dừng. Muốn dừng thì rời app (khóa màn hình, chuyển app/tab): audio và đồng hồ cùng dừng.', 'info'); return; }
     if (st.hidePaused != null) { st.hidePaused = null; clearNote('info'); }
+    if (st.mode === 'exam') hook('onAudioPlay');   // đồng hồ đang dừng (sau khi rời app / mở lại bài) thì chạy tiếp cùng audio
     if (st.loaded) {
       if (!a.paused) { a.pause(); return; }
       const fresh = (() => { const x = loadAuth(); return x && x.expiresAt > Date.now() + 5 * 60_000; })();
@@ -566,9 +607,15 @@
   function onEnded() {
     if (isSilent()) return;
     syncButtons();
+    if (st.practice && st.mode === 'review' && st.loaded && !st.data.byTest) {
+      const p = [1, 2, 3, 4].find((x) => x > st.part && st.data.get(st.test, x));
+      if (p) { log(`Audio luyện Cam ${st.book} Test ${st.test}: hết Part ${st.part}, tự sang Part ${p}.`); $('ap-part').value = p; pick(st.test, p); st.tClick = performance.now(); playClick(); }
+      else note(`Hết audio Test ${st.test}.`, 'info');
+      return;
+    }
     if (st.mode !== 'exam' || !st.loaded) return;
     const next = st.list.findIndex((x, i) => i > st.idx && x.file);
-    if (next < 0) { note(`Hết audio Test ${st.test}.`, 'info'); log(`Audio làm đề Cam ${st.book} Test ${st.test}: phát hết.`); return; }
+    if (next < 0) { note(`Hết audio Test ${st.test}.`, 'info'); log(`Audio làm đề Cam ${st.book} Test ${st.test}: phát hết.`); hook('onAudioDone'); return; }
     const skipped = st.list.slice(st.idx + 1, next).filter((x) => !x.file).map((x) => `Part ${x.part}`);
     summary('hết file');
     st.idx = next;
@@ -655,7 +702,7 @@
     if (!p) return;
     if (st.pending) return;
     p.disabled = !st.cur || !st.cur.file;
-    p.textContent = st.loaded && !a.paused ? '⏸ Tạm dừng' : '▶ Phát';
+    p.textContent = st.loaded && !a.paused ? (st.mode === 'exam' ? '▶ Đang phát' : '⏸ Tạm dừng') : '▶ Phát';
     try { if ('mediaSession' in navigator) navigator.mediaSession.playbackState = st.loaded && !a.paused ? 'playing' : 'paused'; } catch (_) {}
   }
 
@@ -668,7 +715,11 @@
     const ms = navigator.mediaSession, a = audio();
     const set = (k, fn) => { try { ms.setActionHandler(k, fn); } catch (_) {} };
     try { ms.metadata = new MediaMetadata({ title: st.cur.label, artist: 'Luyện IELTS' }); } catch (_) {}
-    set('pause', () => { st.src = 'màn hình khóa / tai nghe'; st.srcT = performance.now(); a.pause(); });
+    set('pause', () => {
+      // m5-2: thi thử không tạm dừng bằng tai nghe khi app đang hiện (rời app thì app tự dừng).
+      if (st.mode === 'exam' && !isHidden()) { log('Audio: bấm tạm dừng ở tai nghe khi đang thi thử: bỏ qua.'); return; }
+      st.src = 'màn hình khóa / tai nghe'; st.srcT = performance.now(); a.pause();
+    });
     set('play', () => {
       if (isHidden()) { log('Audio: bấm Phát ở màn hình khóa lúc app đang ẩn: bỏ qua (mở app rồi bấm Phát).'); return; }
       st.src = 'tai nghe'; st.srcT = performance.now();
@@ -746,7 +797,7 @@
     if (d) d.addEventListener('toggle', () => { out.textContent = techText(); });
   }
 
-  window.AudioPlayer = { openBook, openFile, openExam, close, isOpen: () => st.open, bookAudio, _st: st };
+  window.AudioPlayer = { openBook, openFile, openExam, openPractice, toReview, examPos, examStartAt, close, isOpen: () => st.open, bookAudio, _st: st };
   document.addEventListener('DOMContentLoaded', initTech);
   if (document.readyState !== 'loading') initTech();
 })();

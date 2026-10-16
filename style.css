@@ -227,3 +227,41 @@ body.ap-on .viewer { bottom: var(--ap-h, 0px); padding-bottom: 0; }
   .vside.collapsed { max-height: none; }
   .qgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* m5-2: đồng hồ, lớp che đề khi tạm dừng, phiếu co khi bàn phím bật (điện thoại), Writing, chấm AI */
+.vmain { position: relative; }
+.vcover { position: absolute; inset: 0; z-index: 5; background: var(--bg); display: flex; align-items: center; justify-content: center; padding: 16px; overflow: auto; }
+.vcover[hidden] { display: none; }
+.vc-box { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; max-width: 460px; width: 100%; font-size: 15px; }
+.vc-box p { margin: 6px 0; }
+.vc-q { font-weight: 600; }
+.aclock { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.aclock.low { color: var(--bad); }
+.kbl, .kbr { display: none; }
+.qrow.off input { opacity: .45; }
+.ap label[hidden] { display: none; }
+.wtask { border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px 6px; margin: 6px 0; }
+.wtask textarea.wt { min-height: 8em; resize: vertical; line-height: 1.4; }
+.wprompt summary { font-size: 13px; color: var(--muted); }
+.aibox { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 8px 0; background: var(--bg); }
+.aibox ul { margin: 4px 0 4px 1em; padding: 0; list-style: disc; }
+.aipre { white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 40vh; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px; }
+details.mlist summary { cursor: pointer; }
+details.mlist ul { columns: 2; margin: 4px 0; }
+@media (max-width: 760px) {
+  /* mục 3.2: chừa chỗ dưới ô cuối để thanh ^ v ✓ của bàn phím iOS không che */
+  .vside .vs-body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  /* mục 3.1: bàn phím bật → phiếu co còn 1 dòng: ‹ | số câu + ô đang gõ | › đồng hồ */
+  .vside.kb { flex-direction: row; align-items: center; max-height: none; padding: 2px 4px; gap: 4px; }
+  .vside.kb .vs-head { display: none; }
+  .vside.kb .kbl, .vside.kb .kbr { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .vside.kb .vs-body { flex: 1; min-width: 0; overflow: hidden; padding: 0; }
+  .vside.kb .vs-body > *:not(.kbblk) { display: none; }
+  .vside.kb .qblock.kbblk { border: 0; box-shadow: none; margin: 0; padding: 0; }
+  .vside.kb .qbh { display: none; }
+  .vside.kb .qgrid { display: block; }
+  .vside.kb .qrow { display: none; }
+  .vside.kb .qrow.kbcur { display: flex; }
+  .vside.kb .kbr .aclock { font-size: 12px; max-width: 30vw; overflow: hidden; text-overflow: ellipsis; }
+  details.mlist ul { columns: 1; }
+}

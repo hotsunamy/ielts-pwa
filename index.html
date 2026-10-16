@@ -59,7 +59,8 @@
       <div class="row">
         <button id="ex-review" disabled>Mở ôn tập</button>
         <label>Phần <select id="ex-seg"></select></label>
-        <button id="ex-exam" disabled>Làm đề phần này</button>
+        <button id="ex-exam" disabled>Thi thử phần này</button>
+        <button id="ex-practice" class="secondary" disabled>Luyện phần này</button>
       </div>
       <div class="row">
         <button id="ex-prep" class="secondary" disabled>Chuẩn bị quyển này</button>
@@ -67,7 +68,8 @@
         <button id="ex-keys" class="secondary" disabled>Đáp án quyển này</button>
       </div>
       <p class="hint" id="ex-prep-st"></p>
-      <p class="hint" id="ex-hint"></p>
+      <p class="hint">Thi thử: tính giờ như thi thật, hết giờ tự nộp, không có nút tạm dừng (rời app thì tự dừng). Luyện: vẫn có phiếu và chấm, được dừng, tua audio, chỉ đếm thời gian đã làm.</p>
+      <div class="hint" id="ex-hint"></div>
       <div id="ex-results"></div>
       <details class="tech">
         <summary>Kiểm tra kỹ thuật</summary>
@@ -106,6 +108,7 @@
   <script src="viewer.js"></script>
   <script src="audio.js"></script>
   <script src="grade.js"></script>
+  <script src="clock.js"></script>
   <script src="answers.js"></script>
 </body>
 </html>
