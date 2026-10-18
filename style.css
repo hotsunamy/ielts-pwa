@@ -273,7 +273,7 @@ details.mlist ul { columns: 2; margin: 4px 0; }
 header { flex-wrap: wrap; row-gap: 6px; }
 
 /* m6-1: lật trang bằng cách kéo; nút ‹ › trượt trang mới vào */
-.vscroll { touch-action: pan-y pinch-zoom; }
+.vscroll { touch-action: pan-y; }   /* m6-2: chụm 2 ngón do app xử lý (chỉ phóng trang đề), trình duyệt không phóng cả trang */
 .vflip { position: absolute; z-index: 4; overflow: hidden; pointer-events: none; }
 .vflip[hidden] { display: none; }
 .vflip canvas { position: absolute; top: 0; left: 0; will-change: transform; }
@@ -284,4 +284,8 @@ header { flex-wrap: wrap; row-gap: 6px; }
 @keyframes vslide-r { from { transform: translateX(-32px); opacity: .4; } to { transform: none; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .vbox.slide-l, .vbox.slide-r { animation: none; } .vflip.anim canvas { transition: none; } }
 .vscroll.sliding { overflow-x: hidden; }
-.vscroll.vzoom { touch-action: pinch-zoom; }   /* m6-1: phóng to thì app tự cuộn theo ngón tay (cả 2 chiều) để còn lật được ở mép trang */
+.vscroll.vzoom { touch-action: none; }   /* m6-1: phóng to thì app tự cuộn theo ngón tay (cả 2 chiều) để còn lật được ở mép trang */
+
+/* m6-2: phóng / thu trang đề. Trong trình xem không cho trình duyệt phóng cả giao diện (chụm 2 ngón chỉ phóng trang đề). */
+.viewer { touch-action: pan-x pan-y; }
+.vbar select.vzsel { max-width: 10.5em; }

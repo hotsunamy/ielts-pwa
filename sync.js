@@ -72,7 +72,7 @@
     for (const p of Object.keys(oldStr)) if (!(p in newStr)) removed.push(p);
     return { changed, removed };
   }
-  const strItems = (items) => { const o = {}; for (const [p, v] of Object.entries(items)) o[p] = js(v); return o; };
+  const strItems = (items, key) => { const o = {}; for (const [p, v] of Object.entries(items)) o[p] = valStr(key, v); return o; };
 
   // Mục phía máy này: {t, d, v} hoặc {t, d, x: 1} (đã xóa). Mục cũ chưa có thời điểm: t = 0.
   function localEntry(items, meta, path, dev) {
@@ -81,15 +81,27 @@
     if (m) return { t: m[0], d: m[1], x: 1 };
     return null;
   }
-  const sameVal = (a, b) => (a.x && b.x) || (!a.x && !b.x && js(a.v) === js(b.v));
-  const sameFull = (a, b) => !!a && !!b && a.t === b.t && sameVal(a, b);
+  // m6-2 (lỗi 3): một phần key so theo nội dung (items + groups + checked), bỏ at / src / edits. Hai máy dán cùng một key
+  // (giống từng câu, cùng cụm đã soát) thì là "giống nhau": không báo "Khác nhau", không ghi đè.
+  function keyNorm(v) {
+    if (!isObj(v)) return js(v);
+    const items = {};
+    for (const q of Object.keys(v.items || {}).sort((a, b) => a - b)) { const s = v.items[q]; if (s != null && String(s).trim() !== '') items[q] = String(s); }
+    const groups = (Array.isArray(v.groups) ? v.groups : []).map((g) => (Array.isArray(g) ? g : []).map(Number).sort((a, b) => a - b)).sort((a, b) => (a[0] || 0) - (b[0] || 0));
+    const checked = [...new Set((Array.isArray(v.checked) ? v.checked : []).map(Number))].sort((a, b) => a - b);
+    return JSON.stringify({ items, groups, checked });
+  }
+  const NORM = { 'ielts.keys': keyNorm };
+  const valStr = (key, v) => (key && NORM[key] ? NORM[key](v) : js(v));
+  const sameVal = (a, b, key) => (a.x && b.x) || (!a.x && !b.x && valStr(key, a.v) === valStr(key, b.v));
+  const sameFull = (a, b, key) => !!a && !!b && a.t === b.t && sameVal(a, b, key);
   // Thắng: thời điểm sửa sau. Bằng nhau mà khác giá trị (vd dữ liệu cũ của 2 máy, đều t = 0): giữ bản trên Drive.
-  function pick(l, r) {
+  function pick(l, r, key) {
     if (!r) return 'local';
     if (!l) return 'remote';
     if (l.t > r.t) return 'local';
     if (l.t < r.t) return 'remote';
-    return sameVal(l, r) ? 'same' : 'remote';
+    return sameVal(l, r, key) ? 'same' : 'remote';
   }
 
   // Gộp dữ liệu máy này (local: {[khóa]: {items, meta}}) với một file trên Drive (remote: {keys: {[khóa]: {[đường dẫn]: mục}}}).
@@ -108,19 +120,19 @@
       const paths = new Set([...Object.keys(items), ...Object.keys(meta), ...Object.keys(rk)]);
       for (const path of paths) {
         const l = localEntry(items, meta, path, dev), r = rk[path] || null;
-        const w = pick(l, r);
+        const w = pick(l, r, key);
         if (w === 'local' || w === 'same') {
           if (!l) continue;
           res[path] = w === 'same' && r ? r : l;
-          if (w === 'local' && !sameFull(l, r)) {
+          if (w === 'local' && !sameFull(l, r, key)) {
             push = true;
-            if (!(r && sameVal(l, r))) sent++;
-            if (r && !r.x && !l.x && !sameVal(l, r) && (!since || r.t > since)) conflicts.push({ key, path, kept: 'local', local: l, remote: r });
+            if (!(r && sameVal(l, r, key))) sent++;
+            if (r && !r.x && !l.x && !sameVal(l, r, key) && (!since || r.t > since)) conflicts.push({ key, path, kept: 'local', local: l, remote: r });
           }
           if (w === 'same' && r && (r.t !== l.t || r.d !== l.d)) (metaOnly[key] = metaOnly[key] || {})[path] = [r.t, r.d, r.x ? 1 : 0];
         } else {
           res[path] = r;
-          if (!l || !sameVal(l, r)) {
+          if (!l || !sameVal(l, r, key)) {
             if (!(r.x && !l)) { (apply[key] = apply[key] || {})[path] = r; recv++; }
             if (l && !l.x && !r.x && (!since || l.t === r.t || l.t > since)) conflicts.push({ key, path, kept: 'remote', local: l, remote: r });
           } else (metaOnly[key] = metaOnly[key] || {})[path] = [r.t, r.d, r.x ? 1 : 0];
@@ -148,7 +160,7 @@
     return out;
   }
 
-  const Pure = { SPECS, FILES, FILE_KEYS, itemize, build, diff, strItems, mergeDoc, mergeRemote, localEntry, pick, MAX_ATTEMPTS };
+  const Pure = { SPECS, FILES, FILE_KEYS, itemize, build, diff, strItems, mergeDoc, mergeRemote, localEntry, pick, keyNorm, valStr, MAX_ATTEMPTS };
   if (typeof module !== 'undefined' && module.exports) { module.exports = Pure; return; }
 
   // =====================================================================================================================
@@ -157,7 +169,10 @@
   const STATE_KEY = 'ielts.sync', META_KEY = 'ielts.syncmeta';
   const DRIVE = 'https://www.googleapis.com/drive/v3/';
   const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/';
-  const DELAY = 5000, DELAY_WORK = 30000, PULL_GAP = 30000, RETRY_GAP = 60000, KEEPALIVE_MAX = 60000, INK_WARN = 1e6;
+  const DELAY = 5000, DELAY_WORK = 30000, PULL_GAP = 30000, KEEPALIVE_MAX = 60000, INK_WARN = 1e6;
+  // m6-2 (lỗi 1): mỗi lần gọi Drive tối đa 20 s (iPhone có lúc giữ yêu cầu 122 s không báo lỗi); có mạng lại chờ 3 s cho mạng ổn
+  // rồi mới đồng bộ; lỗi thì thử lại sau 10 s, 30 s, rồi 60 s (thay 60 s cố định).
+  const CFG = { callMs: 20000, onlineWait: 3000, retry: [10000, 30000, 60000] };
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const L = (m) => { if (typeof log === 'function') log(m); };
@@ -170,14 +185,18 @@
   if (!S.dev) S.dev = 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   if (!S.name) S.name = guessName();
   S.ids = S.ids || {}; S.dirty = S.dirty || {}; S.pend = S.pend || {};
+  // m6-2 (lỗi 2): dirty = có gì chưa lên Drive (kể cả "trang đang xem"); loud = có thay đổi thật (mốc, key, bài làm, nét…).
+  // Chỉ thay đổi thật mới tự hẹn một lượt đồng bộ; "trang đang xem" đi kèm lượt đó hoặc khi rời app.
+  if (!S.loud) { S.loud = {}; for (const f of Object.keys(S.pend)) if (S.pend[f] > 0) S.loud[f] = true; }
   const saveState = () => store(STATE_KEY, S);
   saveState();
   const META = load(META_KEY, {}) || {};
   const saveMeta = () => store(META_KEY, META);
   const snap = {};    // {khóa: {đường dẫn: chuỗi JSON}} bản đã biết lần cuối, để biết mục nào vừa đổi
-  for (const k of Object.keys(SPECS)) snap[k] = strItems(itemize(k, readKey(k)));
+  for (const k of Object.keys(SPECS)) snap[k] = strItems(itemize(k, readKey(k)), k);
 
-  const R = { busy: null, again: null, timer: null, due: 0, retryT: null, status: 'off', err: '', lastPull: 0, remote: {}, ver: {}, hidAt: null };
+  const R = { busy: null, again: null, timer: null, due: 0, retryT: null, status: 'off', err: '', lastPull: 0, remote: {}, ver: {}, hidAt: null,
+    fails: 0, retryIn: 0, onlineT: null, ctls: new Set(), cfg: CFG };
 
   function guessName() {
     const ua = navigator.userAgent || '';
@@ -199,7 +218,7 @@
   function touched(k) {
     if (!SPECS[k]) return;
     const now = Date.now();
-    const cur = strItems(itemize(k, readKey(k)));
+    const cur = strItems(itemize(k, readKey(k)), k);
     const { changed, removed } = diff(snap[k] || {}, cur);
     snap[k] = cur;
     if (!changed.length && !removed.length) return;
@@ -211,6 +230,7 @@
     // "Trang đang xem" đổi mỗi lần lật trang: không tự gọi một lượt đồng bộ riêng, đi kèm lượt sau hoặc khi rời app.
     const loud = changed.concat(removed).filter((p) => !(k === 'ielts.pdfcfg' && /\/lastPage$/.test(p)));
     S.dirty[f] = true; S.pend[f] = (S.pend[f] || 0) + loud.length;
+    if (loud.length) S.loud[f] = true;
     saveState();
     if (S.on && loud.length) schedule(working() ? DELAY_WORK : DELAY, 'thay đổi trong máy');
     render();
@@ -225,27 +245,40 @@
     R.timer = setTimeout(() => { R.timer = null; run(dirtyFiles(), why); }, ms);
   }
   const dirtyFiles = () => Object.keys(FILES).filter((f) => S.dirty[f]);
+  const loudFiles = () => Object.keys(FILES).filter((f) => S.loud[f]);
   const allFiles = () => Object.keys(FILES);
 
   // ---------- Gọi Drive ----------
   class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
   class NeedToken extends Error {}
+  // Lỗi mạng / quá giờ: coi như mất mạng (giữ trong máy, thử lại sau).
+  function netErr(late) {
+    const er = new Error(late ? `Drive không trả lời sau ${Math.round(CFG.callMs / 1000)} giây` : 'Không có mạng hoặc Drive không trả lời');
+    er.offline = true; er.timeout = !!late; return er;
+  }
   async function api(method, url, opt = {}) {
     const a = typeof loadAuth === 'function' ? loadAuth() : null;
     if (!a || !a.token) throw new NeedToken('Chưa đăng nhập');
     for (let attempt = 0; ; attempt++) {
-      let res;
+      // m6-2: mỗi lần gọi (cả lúc đọc nội dung trả về) tối đa CFG.callMs; quá thì hủy yêu cầu và báo lỗi mạng.
+      const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+      let late = false, txt = null;
+      const tm = ctl ? setTimeout(() => { late = true; ctl.abort(); }, CFG.callMs) : null;
+      if (ctl) R.ctls.add(ctl);
       try {
-        res = await fetch(url, { method, headers: Object.assign({ Authorization: 'Bearer ' + a.token }, opt.headers || {}), body: opt.body, keepalive: !!opt.keepalive });
-      } catch (e) { const er = new Error('Không có mạng hoặc Drive không trả lời'); er.offline = true; throw er; }
-      if (res.status === 401) {
-        if (typeof saveAuth === 'function') { const x = loadAuth(); if (x) { x.expiresAt = 0; saveAuth(x); } }
-        throw new NeedToken('Token hết hạn (401)');
-      }
-      if ((res.status === 429 || res.status >= 500) && attempt < 2) { await new Promise((r) => setTimeout(r, 800 * (attempt + 1))); continue; }
-      if (!res.ok) { let d = ''; try { d = (await res.json()).error.message; } catch (_) {} throw new HttpError(res.status, `Drive trả ${res.status}${d ? ' ' + d : ''}`); }
-      if (opt.raw) return res;
-      const txt = await res.text();
+        let res;
+        try {
+          res = await fetch(url, { method, headers: Object.assign({ Authorization: 'Bearer ' + a.token }, opt.headers || {}), body: opt.body, keepalive: !!opt.keepalive, signal: ctl ? ctl.signal : undefined });
+        } catch (e) { throw netErr(late); }
+        if (res.status === 401) {
+          if (typeof saveAuth === 'function') { const x = loadAuth(); if (x) { x.expiresAt = 0; saveAuth(x); } }
+          throw new NeedToken('Token hết hạn (401)');
+        }
+        if ((res.status === 429 || res.status >= 500) && attempt < 2) { clearTimeout(tm); await new Promise((r) => setTimeout(r, 800 * (attempt + 1))); continue; }
+        if (!res.ok) { let d = ''; try { d = (await res.json()).error.message; } catch (_) {} throw new HttpError(res.status, `Drive trả ${res.status}${d ? ' ' + d : ''}`); }
+        if (opt.raw) return res;
+        try { txt = await res.text(); } catch (e) { throw netErr(late); }
+      } finally { clearTimeout(tm); if (ctl) R.ctls.delete(ctl); }
       return txt ? JSON.parse(txt) : null;
     }
   }
@@ -284,7 +317,7 @@
       let n = 0;
       for (const [p, r] of Object.entries(apply[k] || {})) {
         const l = localEntry(items, m, p, S.dev);
-        if (pick(l, r) !== 'remote') continue;
+        if (pick(l, r, k) !== 'remote') continue;
         if (r.x) delete items[p]; else items[p] = r.v;
         m[p] = [r.t, r.d, r.x ? 1 : 0];
         n++;
@@ -293,7 +326,7 @@
       if (n) {
         const v = build(k, items);
         try { if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, JSON.stringify(v)); } catch (e) { L('Đồng bộ: không ghi được vào máy: ' + e.message); continue; }
-        snap[k] = strItems(itemize(k, readKey(k)));
+        snap[k] = strItems(itemize(k, readKey(k)), k);
         changedKeys.push(k);
       }
     }
@@ -315,7 +348,7 @@
   }
   async function syncFile(f, dups, rep) {
     const wasPend = S.pend[f] || 0;
-    S.dirty[f] = false; saveState();
+    S.dirty[f] = false; S.loud[f] = false; saveState();
     let id = S.ids[f], remote = null;
     // Đọc số version trước (yêu cầu nhỏ). Drive chưa đổi từ lần đọc/ghi trước trong phiên này (cùng version): dùng bản đã có,
     // khỏi tải lại cả file. Version đọc TRƯỚC nội dung, nên nội dung tải về không bao giờ cũ hơn version đã nhớ.
@@ -354,39 +387,53 @@
       files.forEach((f) => R.again.files.add(f));
       return R.busy;
     }
-    clearTimeout(R.timer); R.timer = null; clearTimeout(R.retryT);
+    clearTimeout(R.timer); R.timer = null; clearTimeout(R.retryT); R.retryIn = 0;
     if (!tokenOk()) { R.status = 'token'; render(); return Promise.resolve(); }
     if (navigator.onLine === false) { R.status = 'offline'; render(); return Promise.resolve(); }
     R.status = 'busy'; render();
     const t0 = performance.now();
     const rep = { files: [], recv: 0, sent: 0, changed: [], conflicts: [], notes: [], cached: 0 };
+    const wasDirty = Object.assign({}, S.dirty), wasLoud = Object.assign({}, S.loud);
     R.busy = (async () => {
       try {
         const { dups } = await fileIds();
         for (const f of files) await syncFile(f, dups, rep);
         if (files.length === allFiles().length) R.lastPull = Date.now();
         S.lastSyncAt = Date.now(); S.lastOk = Date.now(); saveState();
-        R.status = 'ok'; R.err = '';
+        R.status = 'ok'; R.err = ''; R.fails = 0;
         L(`Đồng bộ (${why}): ${rep.recv ? `nhận ${rep.recv} mục` : 'không có mục mới từ máy khác'}, ${rep.sent ? `gửi ${rep.sent} mục` : 'không có gì phải gửi'}; ${rep.files.join(', ')}; ${Math.round(performance.now() - t0)} ms` +
           `${rep.cached ? `; ${rep.cached} file Drive chưa đổi, không tải lại` : ''}${rep.conflicts.length ? `; ${rep.conflicts.length} chỗ hai máy khác nhau (xem dòng dưới)` : ''}${rep.notes.length ? '; ' + rep.notes.join('; ') : ''}.`);
         logConflicts(rep.conflicts);
         if (rep.changed.length) changedEvent([...new Set(rep.changed)], why);
       } catch (e) {
+        const ms = Math.round(performance.now() - t0);
         if (e instanceof NeedToken) { R.status = 'token'; R.err = e.message; L(`Đồng bộ (${why}): ${e.message}, chờ gia hạn token.`); }
-        else if (e.offline) { R.status = 'offline'; R.err = e.message; L(`Đồng bộ (${why}): ${e.message}. Có mạng lại sẽ tự đồng bộ.`); retryLater(); }
-        else { R.status = 'error'; R.err = e.message; L(`Đồng bộ (${why}) lỗi: ${e.message}. Sẽ thử lại sau ${RETRY_GAP / 1000} giây.`); retryLater(); }
-        for (const f of files) S.dirty[f] = S.dirty[f] || (S.pend[f] || 0) > 0;
+        else if (e.offline) { R.status = 'offline'; R.err = e.message; const s = retryLater(); L(`Đồng bộ (${why}): ${e.message} (${ms} ms). Thử lại sau ${s} giây; có mạng lại cũng tự đồng bộ.`); }
+        else { R.status = 'error'; R.err = e.message; const s = retryLater(); L(`Đồng bộ (${why}) lỗi: ${e.message} (${ms} ms). Thử lại sau ${s} giây.`); }
+        for (const f of files) {
+          S.dirty[f] = !!(S.dirty[f] || wasDirty[f] || (S.pend[f] || 0) > 0);
+          S.loud[f] = !!(S.loud[f] || wasLoud[f] || (S.pend[f] || 0) > 0);
+        }
         saveState();
       } finally {
         R.busy = null;
         render();
         if (R.again) { const a = R.again; R.again = null; run([...a.files], a.why); }
-        else if (dirtyFiles().length && R.status === 'ok') schedule(working() ? DELAY_WORK : DELAY, 'thay đổi trong lúc đồng bộ');
+        // Chỉ thay đổi thật trong lúc đồng bộ mới hẹn lượt mới; "trang đang xem" (lật trang) thì chờ lượt sau / rời app.
+        else if (loudFiles().length && R.status === 'ok') schedule(working() ? DELAY_WORK : DELAY, 'thay đổi trong lúc đồng bộ');
       }
     })();
     return R.busy;
   }
-  function retryLater() { clearTimeout(R.retryT); R.retryT = setTimeout(() => run(dirtyFiles().length ? dirtyFiles() : allFiles(), 'thử lại'), RETRY_GAP); }
+  // Thử lại sau 10 s, 30 s, rồi 60 s mỗi lần (đếm số lần lỗi liền nhau; đồng bộ được hoặc có mạng lại thì đếm lại từ đầu). Trả về số giây.
+  function retryLater() {
+    clearTimeout(R.retryT);
+    R.fails++;
+    const ms = CFG.retry[Math.min(R.fails, CFG.retry.length) - 1];
+    R.retryIn = Date.now() + ms;
+    R.retryT = setTimeout(() => { R.retryIn = 0; run(dirtyFiles().length ? dirtyFiles() : allFiles(), 'thử lại'); }, ms);
+    return Math.round(ms / 1000);
+  }
 
   // Rời app: đẩy ngay phần chưa đồng bộ. Đã có bản Drive từ lượt trước trong phiên này thì gộp với bản đó và ghi thẳng (không tải
   // lại, để kịp trước khi iPhone tạm dừng app); file nhỏ dùng keepalive. Bản đó cũ hơn Drive thì máy kia có mục mới hơn sẽ tự đẩy lại.
@@ -399,13 +446,14 @@
       const id = S.ids[f], cached = R.remote[f];
       if (!id || !cached) { run([f], why); continue; }
       const m = mergeDoc(gather(f), cached, { dev: S.dev, lastSyncAt: S.lastSyncAt || 0 });
-      if (!m.push) { S.dirty[f] = false; S.pend[f] = 0; continue; }
+      if (!m.push) { S.dirty[f] = false; S.loud[f] = false; S.pend[f] = 0; continue; }
       const body = JSON.stringify(Object.assign({ v: 1, app: 'ielts-pwa', file: f, at: Date.now(), by: S.name, dev: S.dev }, m.doc));
-      S.dirty[f] = false; const wasPend = S.pend[f] || 0;
+      const wasLoud = !!S.loud[f];
+      S.dirty[f] = false; S.loud[f] = false; const wasPend = S.pend[f] || 0;
       updateFile(id, body, body.length < KEEPALIVE_MAX).then((r) => {
         R.remote[f] = m.doc; R.ver[f] = r && r.version != null ? String(r.version) : null; S.pend[f] = Math.max(0, (S.pend[f] || 0) - wasPend); S.lastSyncAt = Date.now(); saveState();
         L(`Đồng bộ (${why}): gửi ${m.sent} mục, ${FILES[f]} ${kb(body.length)}${body.length < KEEPALIVE_MAX ? ' (keepalive)' : ''}.`); render();
-      }, (e) => { S.dirty[f] = true; saveState(); L(`Đồng bộ (${why}) chưa gửi được ${FILES[f]}: ${e.message}. Lần mở app sau sẽ gửi.`); });
+      }, (e) => { S.dirty[f] = true; S.loud[f] = S.loud[f] || wasLoud; saveState(); L(`Đồng bộ (${why}) chưa gửi được ${FILES[f]}: ${e.message}. Lần mở app sau sẽ gửi.`); });
     }
     saveState();
   }
@@ -504,6 +552,7 @@
   }
 
   // ---------- Hiển thị ----------
+  const retryTxt = () => (R.retryIn ? ` (thử lại lúc ${new Date(R.retryIn).toLocaleTimeString('vi-VN')})` : '');
   function statusText() {
     const pend = pendCount();
     if (!S.on) return { line: 'Chưa bật trên máy này: mốc trang, đáp án, bài làm chỉ nằm trong máy.', chip: '' };
@@ -511,8 +560,8 @@
     switch (R.status) {
       case 'busy': return { line: `Đang đồng bộ…${p}`, chip: '⟳ đồng bộ' };
       case 'token': return { line: `Chờ gia hạn token để đồng bộ.${p} Bấm "Đồng bộ ngay".`, chip: pend ? `chờ đồng bộ ${pend}` : 'chờ token' };
-      case 'offline': return { line: `Ngoại tuyến.${p} Có mạng lại sẽ tự đồng bộ.`, chip: pend ? `ngoại tuyến · ${pend}` : 'ngoại tuyến' };
-      case 'error': return { line: `Lỗi đồng bộ: ${R.err}.${p} Sẽ tự thử lại.`, chip: pend ? `chờ đồng bộ ${pend}` : 'lỗi đồng bộ' };
+      case 'offline': return { line: `Ngoại tuyến${R.err && R.err.includes('giây') ? ` (${R.err})` : ''}.${p} Có mạng lại sẽ tự đồng bộ${retryTxt()}.`, chip: pend ? `ngoại tuyến · ${pend}` : 'ngoại tuyến' };
+      case 'error': return { line: `Lỗi đồng bộ: ${R.err}.${p} Sẽ tự thử lại${retryTxt()}.`, chip: pend ? `chờ đồng bộ ${pend}` : 'lỗi đồng bộ' };
       default: return { line: S.lastOk ? `Đã đồng bộ lúc ${hm(S.lastOk)} (máy này: ${S.name}).${p}` : `Bật trên máy này (${S.name}), chưa đồng bộ lần nào.${p}`, chip: pend ? `chờ đồng bộ ${pend}` : S.lastOk ? `✓ đồng bộ ${hm(S.lastOk)}` : '' };
     }
   }
@@ -532,7 +581,19 @@
     if (document.visibilityState === 'hidden') { R.hidAt = Date.now(); setTimeout(() => pushOnHide('rời app'), 0); return; }
     if (!S.on) return;
     if (Date.now() - R.lastPull > PULL_GAP) run(allFiles(), 'quay lại app');
-    else if (dirtyFiles().length) schedule(0, 'quay lại app');
+    else if (loudFiles().length) schedule(0, 'quay lại app');
+  }
+  // m6-2: có mạng lại thì chờ 3 s cho mạng ổn rồi mới đồng bộ; yêu cầu đang treo (bắt đầu lúc mạng chập chờn) thì hủy để đi lại ngay.
+  function onOnline() {
+    if (!S.on) return;
+    R.fails = 0; clearTimeout(R.retryT); R.retryIn = 0;
+    clearTimeout(R.onlineT);
+    R.onlineT = setTimeout(() => {
+      R.onlineT = null;
+      if (R.busy) { for (const c of R.ctls) { try { c.abort(); } catch (_) {} } }
+      run(dirtyFiles().length ? dirtyFiles() : allFiles(), 'có mạng lại');
+    }, CFG.onlineWait);
+    render();
   }
   // Chờ lượt đồng bộ đang chạy (vd vừa quay lại app) xong, tối đa ms. Không bật / không có lượt nào thì xong ngay.
   function whenFresh(ms = 3000) {
@@ -548,8 +609,8 @@
     }
     document.addEventListener('visibilitychange', onVis);
     window.addEventListener('pagehide', () => pushOnHide('đóng trang'));
-    window.addEventListener('online', () => { if (S.on) run(dirtyFiles().length ? dirtyFiles() : allFiles(), 'có mạng lại'); });
-    window.addEventListener('ielts-token', () => { if (S.on && (R.status === 'token' || dirtyFiles().length || !R.lastPull)) run(allFiles(), 'có token mới'); });
+    window.addEventListener('online', onOnline);
+    window.addEventListener('ielts-token', () => { if (S.on && (R.status === 'token' || loudFiles().length || !R.lastPull)) run(allFiles(), 'có token mới'); });
     R.status = S.on ? 'ok' : 'off';
     render();
     if (S.on) {

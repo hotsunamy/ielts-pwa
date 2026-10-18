@@ -5,7 +5,12 @@
 (function () {
   const PCFG_KEY = 'ielts.pdfcfg';   // {[fileId]: {marks: {key: trang PDF}, offset: lệch số trang in, lastPage}}
   const INK_KEY = 'ielts.ink';       // {[fileId]: {[trang]: [{t: 'hl'|'ul', p: 'x,y x,y'}]}}
-  const ZOOMS = [1, 1.25, 1.5, 2, 2.5, 3];
+  // m6-2: mức phóng liên tục 50%–300% (1 = vừa bề ngang). Nút − / + đi theo nấc, thêm mức "Vừa trang" (thấy trọn trang).
+  // Mức phóng nhớ theo từng máy (localStorage 'ielts.zoom'), không đồng bộ.
+  const LEVELS = [0.5, 0.67, 0.75, 1, 1.25, 1.5, 2, 2.5, 3];
+  const ZMIN = 0.5, ZMAX = 3;
+  const ZOOM_KEY = 'ielts.zoom';
+  const clampZ = (z) => Math.min(ZMAX, Math.max(ZMIN, z));
   const MAX_PX = 12e6;               // trần số điểm ảnh mỗi canvas (iPhone giới hạn khoảng 16,7 triệu)
   const INK_W = 1000;                // hệ tọa độ nét vẽ: bề ngang trang = 1000 đơn vị
   const S = Sections;
@@ -13,7 +18,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   const st = {
-    file: null, src: null, doc: null, num: 0, page: 1, zoom: 0, mode: 'review', segKey: null,
+    file: null, src: null, doc: null, num: 0, page: 1, z: 1, zmode: null, ratio: 1.414, pinch: null, undo: [], mode: 'review', segKey: null,
     segs: [], allowed: [], tool: 'view', seq: 0, task: null, pageObj: null, ink: null, H: 1414, drawing: null, detect: null,
     style: 'mock',     // m5-2: làm đề kiểu 'mock' (Thi thử: giờ, không dừng tay) hoặc 'practice' (Luyện: có phiếu và chấm, dừng/tua tự do)
     pen: false, pan: null,   // m5-2 mục 3.8: đã thấy bút (Apple Pencil) thì lớp vẽ chỉ nhận nét bút, ngón tay để cuộn
@@ -43,7 +48,7 @@
     <button class="small" data-v="prev" aria-label="Trang trước">‹</button>
     <span class="vnav"><span class="lbl">Trang</span> <input id="v-goto" inputmode="numeric" size="3"> / <span id="v-num"></span> <span id="v-printed" class="hint"></span></span>
     <button class="small" data-v="next" aria-label="Trang sau">›</button>
-    <button class="small secondary" data-v="zoomout" aria-label="Thu nhỏ">−</button><span id="v-zoom" class="hint"></span><button class="small secondary" data-v="zoomin" aria-label="Phóng to">+</button>
+    <button class="small secondary" data-v="zoomout" aria-label="Thu nhỏ">−</button><select id="v-zoom" class="vzsel" aria-label="Mức phóng"></select><button class="small secondary" data-v="zoomin" aria-label="Phóng to">+</button>
     <select id="v-jump" aria-label="Đi tới phần"></select>
   </div>
   <div class="vbar vtools">
@@ -52,6 +57,7 @@
     <button class="small tool" data-tool="ul">Gạch chân</button>
     <button class="small tool" data-tool="erase">Tẩy</button>
     <button class="small secondary" data-v="undo">Hoàn tác</button>
+    <button class="small secondary" data-v="clearink" id="v-clearink">Xóa nét…</button>
     <button class="small secondary" data-v="marks" id="v-marks-btn">Đánh dấu trang</button>
     <button class="small secondary" data-v="audio" id="v-audio-btn">Audio</button>
     <button class="small secondary" data-v="keys" id="v-keys-btn">Đáp án</button>
@@ -83,6 +89,20 @@
     sc.addEventListener('pointermove', flipMove);
     sc.addEventListener('pointerup', flipUp);
     sc.addEventListener('pointercancel', flipCancelEv);
+    // m6-2: chụm 2 ngón phóng trang đề; Ctrl + lăn / chụm touchpad; chặn phóng cả giao diện app khi trình xem đang mở.
+    const np = { passive: false };
+    sc.addEventListener('touchstart', pinchStart, np);
+    sc.addEventListener('touchmove', pinchMove, np);
+    sc.addEventListener('touchend', pinchEnd, np);
+    sc.addEventListener('touchcancel', pinchEnd, np);
+    document.addEventListener('touchmove', (e) => { if (!$('viewer').hidden && e.touches.length > 1 && e.cancelable) e.preventDefault(); }, np);
+    for (const t of ['gesturestart', 'gesturechange', 'gestureend']) document.addEventListener(t, onGesture, np);
+    v.addEventListener('wheel', onWheel, np);
+    $('v-zoom').addEventListener('change', () => {
+      const val = $('v-zoom').value;
+      if (val === 'page') setZoom(1, 'page'); else if (val !== 'cur') setZoom(Number(val), null);
+      $('v-zoom').blur();
+    });
     window.addEventListener('keydown', (e) => {
       if ($('viewer').hidden || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
       if (e.key === 'ArrowRight' || e.key === 'PageDown') { go(st.page, +1); e.preventDefault(); }
@@ -120,7 +140,8 @@
     const wait = window.ensureToken();   // gọi trước mọi await để cửa sổ gia hạn không bị chặn
     buildDom();
     await closeDoc();
-    Object.assign(st, { file: opts.file, mode: opts.mode || 'review', segKey: opts.segKey || null, tool: 'view', zoom: 0, page: 1, lastRender: null, inkKB: null,
+    const zp = zoomPref();
+    Object.assign(st, { file: opts.file, mode: opts.mode || 'review', segKey: opts.segKey || null, tool: 'view', z: zp.z, zmode: zp.mode, pinch: null, undo: [], page: 1, lastRender: null, inkKB: null,
       style: opts.style === 'practice' ? 'practice' : 'mock' });
     $('viewer').hidden = false;
     document.body.classList.add('viewing');
@@ -284,7 +305,7 @@
     const last = st.mode === 'exam' ? st.page === st.allowed[st.allowed.length - 1] : st.page >= st.num;
     $('viewer').querySelector('[data-v="prev"]').disabled = first;
     $('viewer').querySelector('[data-v="next"]').disabled = last;
-    $('v-zoom').textContent = Math.round(ZOOMS[st.zoom] * 100) + '%';
+    zoomUI();
   }
 
   // ---------- Vẽ trang ra ảnh ----------
@@ -298,7 +319,9 @@
     if (my !== st.seq) return;
     const base = page.getViewport({ scale: 1 });
     const boxW = Math.max(200, $('v-scroll').clientWidth - 16);
-    const cssW = Math.round(boxW * ZOOMS[st.zoom]);
+    st.ratio = base.height / base.width;
+    if (st.zmode === 'page') { st.z = fitPageZ(); zoomUI(); }   // "Vừa trang": tính theo kích thước trang này và khung hiện tại
+    const cssW = Math.round(boxW * st.z);
     const cssH = Math.round(cssW * base.height / base.width);
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     let px = (cssW / base.width) * dpr;
@@ -316,10 +339,10 @@
     if (old) { old.width = 0; old.height = 0; old.remove(); }
     box.style.width = cssW + 'px'; box.style.height = cssH + 'px';
     st.renderedW = $('v-scroll').clientWidth;
-    $('v-scroll').classList.toggle('vzoom', st.zoom > 0);
+    $('v-scroll').classList.toggle('vzoom', st.z > 1.001);
     box.insertBefore(canvas, $('v-ink'));
     // Trượt trang mới vào (0,2 s). Chỉ khi chưa phóng to; tạm ẩn thanh cuộn ngang để trang trượt không làm hiện thanh cuộn.
-    if (st.slideDir && st.zoom === 0) {
+    if (st.slideDir && st.z <= 1.001) {
       const sc = $('v-scroll');
       box.classList.remove('slide-l', 'slide-r'); void box.offsetWidth;
       sc.classList.add('sliding');
@@ -372,13 +395,15 @@
     if (!touchy()) return;
     clearTimeout(peekT);
     peekT = setTimeout(() => {
-      const w = Math.max(200, $('v-scroll').clientWidth - 16);
+      const w = peekCssW();
       if (w !== st.peekW) { clearPeek(); st.peekW = w; }
       const want = [neighbor(-1), neighbor(+1)].filter((x) => x != null);
       for (const k of [...st.peek.keys()]) if (!want.includes(k)) { const v = st.peek.get(k); if (v.canvas) v.canvas.width = 0; st.peek.delete(k); }
       for (const n of want) if (!st.peek.has(n)) renderPeek(n);
     }, 250);
   }
+  // Bề ngang trang kế vẽ sẵn: như trang đang xem khi thu nhỏ (dưới 100%), vừa bề ngang khi 100% trở lên (phóng to chỉ lật ở mép).
+  const peekCssW = () => Math.round(Math.max(200, $('v-scroll').clientWidth - 16) * Math.min(1, st.z));
   // Vẽ sẵn trang kế (vừa bề ngang, như mức phóng 100%) để lúc kéo không thấy khoảng trắng. Độ nét thấp hơn trang chính một chút.
   async function renderPeek(n) {
     const my = st.peekSeq, doc = st.doc;
@@ -389,7 +414,7 @@
         const page = await doc.getPage(n);
         if (my !== st.peekSeq || doc !== st.doc) return null;
         const base = page.getViewport({ scale: 1 });
-        const cssW = Math.max(200, $('v-scroll').clientWidth - 16);
+        const cssW = peekCssW();
         const cssH = Math.round(cssW * base.height / base.width);
         let px = (cssW / base.width) * Math.min(window.devicePixelRatio || 1, 1.5);
         if (base.width * base.height * px * px > 4e6) px = Math.sqrt(4e6 / (base.width * base.height));
@@ -405,7 +430,7 @@
     })();
   }
   function flipDown(e) {
-    if (e.pointerType !== 'touch' || !st.doc || st.flipAnim || st.flip || $('viewer').hidden) return;
+    if (e.pointerType !== 'touch' || !st.doc || st.flipAnim || st.flip || st.pinch || $('viewer').hidden) return;
     if (st.tool !== 'view' && !st.pen) return;   // đang vẽ bằng ngón tay
     const sc = $('v-scroll');
     const maxL = Math.max(0, sc.scrollWidth - sc.clientWidth);
@@ -416,7 +441,7 @@
   }
   function flipMove(e) {
     const g = st.flip;
-    if (!g || e.pointerId !== g.id) return;
+    if (!g || e.pointerId !== g.id || st.pinch) return;
     const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
     const t = performance.now();
     if (t > g.lt) { g.v = 0.6 * ((e.clientX - g.lx) / (t - g.lt)) + 0.4 * g.v; g.lx = e.clientX; g.lt = t; }
@@ -529,6 +554,151 @@
     const box = $('v-box'); if (box) box.style.visibility = '';
   }
 
+  // ---------- Phóng / thu (m6-2) ----------
+  // Nút − / + theo nấc (50, 67, 75, Vừa trang, 100, 125, 150, 200, 250, 300%), ô chọn mức, chụm 2 ngón (điện thoại / iPad),
+  // Ctrl + lăn chuột / chụm touchpad (máy tính). Chỉ phóng trang đề, không phóng cả giao diện app. Lúc đang chụm / lăn: kéo giãn
+  // tạm khung trang (hơi mờ), giữ điểm giữa 2 ngón / con trỏ đứng yên; thả tay thì vẽ lại cho nét. Đang chụm thì không lật trang.
+  function zoomPref() {
+    const p = loadJSON(ZOOM_KEY, null);
+    if (p && p.mode === 'page') return { z: 1, mode: 'page' };
+    return { z: p && Number.isFinite(p.z) ? clampZ(p.z) : 1, mode: null };
+  }
+  function saveZoomPref() { try { localStorage.setItem(ZOOM_KEY, JSON.stringify(st.zmode === 'page' ? { mode: 'page' } : { z: Math.round(st.z * 1000) / 1000 })); } catch (_) {} }
+  // Mức "Vừa trang": cả trang lọt trong khung (không quá 100% = vừa bề ngang). Màn hình rộng (máy tính) có thể cần dưới 50%:
+  // "Vừa trang" được xuống tới 20%, và chụm / lăn cũng thu được tới mức đó (thấp nhất là 50% hoặc mức vừa trang, mức nào nhỏ hơn).
+  function fitPageZ() {
+    const sc = $('v-scroll');
+    const cs = getComputedStyle(sc);
+    const fh = sc.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0) - 4;
+    const boxW = Math.max(200, sc.clientWidth - 16);
+    return Math.min(1, Math.max(0.2, fh / (boxW * st.ratio)));
+  }
+  const zLo = () => (st.doc ? Math.min(ZMIN, fitPageZ()) : ZMIN);
+  function zoomUI() {
+    const el = $('v-zoom'); if (!el) return;
+    const fz = st.doc ? fitPageZ() : null;
+    const pct = (z) => Math.round(z * 100) + '%';
+    const opts = [['page', `Vừa trang${fz != null ? ` (${pct(fz)})` : ''}`, fz != null ? fz : 0.9]]
+      .concat(LEVELS.map((l) => [String(l), pct(l) + (l === 1 ? ' (vừa ngang)' : ''), l]));
+    let val = st.zmode === 'page' ? 'page' : (LEVELS.find((l) => Math.abs(l - st.z) < 0.005) != null ? String(LEVELS.find((l) => Math.abs(l - st.z) < 0.005)) : 'cur');
+    if (val === 'cur') opts.push(['cur', pct(st.z), st.z]);
+    opts.sort((a, b) => a[2] - b[2]);
+    const html = opts.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join('');
+    if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+    el.value = val;
+  }
+  // Nấc kế tiếp (dir = +1 / -1) từ mức hiện tại, gồm cả mức "Vừa trang" (bỏ nếu trùng một nấc có sẵn).
+  function zoomStep(dir) {
+    const fz = fitPageZ();
+    const lv = LEVELS.map((l) => ({ z: l, mode: null }));
+    if (!LEVELS.some((l) => Math.abs(l - fz) < 0.02)) lv.push({ z: fz, mode: 'page' });
+    lv.sort((a, b) => a.z - b.z);
+    const cur = st.zmode === 'page' ? fz : st.z;
+    const nx = dir > 0 ? lv.find((x) => x.z > cur + 0.005) : [...lv].reverse().find((x) => x.z < cur - 0.005);
+    if (nx) setZoom(nx.z, nx.mode);
+  }
+  // Điểm neo mặc định: giữa vùng đang thấy.
+  function centerAnchor() {
+    const r = $('v-scroll').getBoundingClientRect(), b = $('v-box').getBoundingClientRect();
+    const ax = r.left + r.width / 2, ay = r.top + r.height / 2;
+    return { ax, ay, fx: (ax - b.left) / (b.width || 1), fy: (ay - b.top) / (b.height || 1) };
+  }
+  // Kéo giãn tạm khung trang tới mức z, giữ điểm (fx, fy) của trang (tỉ lệ theo bề ngang / cao) ở tọa độ màn hình (ax, ay).
+  function liveZoom(z, a) {
+    const sc = $('v-scroll'), box = $('v-box');
+    z = Math.min(ZMAX, Math.max(zLo(), z));
+    st.seq++;   // bỏ lượt vẽ trang đang dở (nếu có), để nó không đặt lại kích thước cũ
+    if (st.task) { try { st.task.cancel(); } catch (_) {} }
+    const boxW = Math.max(200, sc.clientWidth - 16);
+    const w = Math.round(boxW * z), h = Math.round(w * st.ratio);
+    box.style.width = w + 'px'; box.style.height = h + 'px';
+    const c = box.querySelector('canvas'); if (c) { c.style.width = w + 'px'; c.style.height = h + 'px'; }
+    sc.classList.toggle('vzoom', z > 1.001);
+    const r = box.getBoundingClientRect();
+    sc.scrollLeft += (r.left + a.fx * w) - a.ax;
+    sc.scrollTop += (r.top + a.fy * h) - a.ay;
+    st.z = z;
+    zoomUI();
+  }
+  // Đặt mức phóng (nút, ô chọn) rồi vẽ lại cho nét.
+  function setZoom(z, mode, a) {
+    if (!st.doc) return;
+    st.zmode = mode === 'page' ? 'page' : null;
+    liveZoom(st.zmode === 'page' ? fitPageZ() : z, a || centerAnchor());
+    saveZoomPref();
+    return render();
+  }
+  let zoomT = null;
+  function commitZoomSoon(ms) {
+    clearTimeout(zoomT);
+    zoomT = setTimeout(() => { zoomT = null; if (!st.doc || st.pinch) return; saveZoomPref(); render(); }, ms);
+  }
+  // Chụm 2 ngón: dùng sự kiện touch (chặn được cử chỉ của trình duyệt bằng preventDefault, kể cả Safari iOS).
+  const tpt = (t) => ({ x: t.clientX, y: t.clientY });
+  function pinchStart(e) {
+    if (!st.doc || $('viewer').hidden || e.touches.length < 2 || st.pinch) return;
+    const a = tpt(e.touches[0]), b = tpt(e.touches[1]);
+    // Đang kéo lật trang / đang vẽ bằng ngón tay: hủy, chuyển sang chụm.
+    if (st.flip) { if (st.flipAnim) return; flipReset(); }
+    if (st.drawing) { st.drawing = null; const lv = $('v-live'); if (lv) lv.setAttribute('points', ''); }
+    st.pan = null;
+    clearTimeout(zoomT); zoomT = null;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const box = $('v-box').getBoundingClientRect();
+    st.pinch = { ids: [e.touches[0].identifier, e.touches[1].identifier], d0: Math.max(10, Math.hypot(a.x - b.x, a.y - b.y)), z0: st.z,
+      fx: (mx - box.left) / (box.width || 1), fy: (my - box.top) / (box.height || 1), moved: false };
+    st.zmode = null;
+    e.preventDefault();
+  }
+  function pinchMove(e) {
+    const p = st.pinch;
+    if (!p) return;
+    e.preventDefault();
+    const ts = p.ids.map((id) => [...e.touches].find((t) => t.identifier === id)).filter(Boolean);
+    if (ts.length < 2) return;
+    const a = tpt(ts[0]), b = tpt(ts[1]);
+    const d = Math.max(10, Math.hypot(a.x - b.x, a.y - b.y));
+    p.last = { z: p.z0 * d / p.d0, ax: (a.x + b.x) / 2, ay: (a.y + b.y) / 2 };
+    if (p.raf) return;
+    p.raf = requestAnimationFrame(() => { p.raf = 0; if (st.pinch !== p || !p.last) return; p.moved = true; liveZoom(p.last.z, { ax: p.last.ax, ay: p.last.ay, fx: p.fx, fy: p.fy }); });
+  }
+  function pinchEnd(e) {
+    const p = st.pinch;
+    if (!p) return;
+    if (p.ids.every((id) => [...e.touches].some((t) => t.identifier === id))) return;   // vẫn còn đủ 2 ngón
+    if (p.raf) { cancelAnimationFrame(p.raf); p.raf = 0; if (p.last) liveZoom(p.last.z, { ax: p.last.ax, ay: p.last.ay, fx: p.fx, fy: p.fy }); }
+    st.pinch = null;
+    if (e.cancelable) e.preventDefault();
+    if (p.moved || p.last) { log(`Phóng trang (chụm 2 ngón): ${Math.round(p.z0 * 100)}% → ${Math.round(st.z * 100)}%.`); commitZoomSoon(60); }
+  }
+  // Ctrl + lăn chuột / chụm touchpad (Chrome, Edge gửi wheel kèm ctrlKey): giữ điểm dưới con trỏ.
+  function onWheel(e) {
+    if (!e.ctrlKey || !st.doc || $('viewer').hidden) return;
+    e.preventDefault();
+    const sc = $('v-scroll'), r = sc.getBoundingClientRect(), b = $('v-box').getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    const ax = inside ? e.clientX : r.left + r.width / 2, ay = inside ? e.clientY : r.top + r.height / 2;
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+    const f = Math.exp(-Math.max(-300, Math.min(300, dy)) * 0.002);   // 1 nấc lăn (100) ≈ ×0,82 / ×1,22
+    st.zmode = null;
+    liveZoom(st.z * f, { ax, ay, fx: (ax - b.left) / (b.width || 1), fy: (ay - b.top) / (b.height || 1) });
+    commitZoomSoon(200);
+  }
+  // Safari máy Mac: chụm touchpad gửi gesturestart/gesturechange (không có wheel). iPhone/iPad: chỉ chặn (đã xử lý bằng touch).
+  let gest = null;
+  function onGesture(e) {
+    if ($('viewer').hidden) return;
+    e.preventDefault();
+    if (('ontouchstart' in window) || !st.doc || st.pinch) return;
+    if (e.type === 'gesturestart') {
+      const b = $('v-box').getBoundingClientRect(), r = $('v-scroll').getBoundingClientRect();
+      const ax = e.clientX || r.left + r.width / 2, ay = e.clientY || r.top + r.height / 2;
+      gest = { z0: st.z, ax, ay, fx: (ax - b.left) / (b.width || 1), fy: (ay - b.top) / (b.height || 1) };
+      st.zmode = null;
+    } else if (gest && e.type === 'gesturechange') liveZoom(gest.z0 * e.scale, gest);
+    else if (gest && e.type === 'gestureend') { gest = null; commitZoomSoon(60); }
+  }
+
   // ---------- Lớp vẽ (highlight, gạch chân, tẩy) ----------
   function inkAll() { return loadJSON(INK_KEY, {}); }
   function inkPage() { const a = inkAll(); return ((a[st.file.id] || {})[st.page]) || []; }
@@ -558,7 +728,7 @@
     return [Math.round((e.clientX - r.left) / r.width * INK_W * 10) / 10, Math.round((e.clientY - r.top) / r.height * st.H * 10) / 10];
   }
   function inkDown(e) {
-    if (st.tool === 'view' || !st.doc) return;
+    if (st.tool === 'view' || !st.doc || st.pinch) return;
     // m5-2 mục 3.8 (iPad): lần đầu thấy nét bút thì bật chế độ bút; từ đó ngón tay (và lòng bàn tay) không vẽ, chỉ cuộn trang.
     if (e.pointerType === 'pen' && !st.pen) {
       st.pen = true; saveJSON(PEN_KEY, true);
@@ -574,6 +744,7 @@
     else { const live = $('v-live'); live.setAttribute('class', 'ink-' + st.tool); }
   }
   function inkMove(e) {
+    if (st.pinch) return;
     if (st.pan && e.pointerId === st.pan.id) {
       e.preventDefault();
       const sc = $('v-scroll');
@@ -614,8 +785,10 @@
     const list = inkPage();
     list.push({ t: d.t, p: pts.map((q) => q.join(',')).join(' ') });
     saveInkPage(list);
+    pushUndo({ kind: 'stroke', page: st.page });
     drawInk();
   }
+  function pushUndo(a) { st.undo.push(a); if (st.undo.length > 60) st.undo.shift(); }
   function segDist(p, a, b) {
     const dx = b[0] - a[0], dy = b[1] - a[1];
     const L = dx * dx + dy * dy;
@@ -634,7 +807,65 @@
     });
     if (keep.length !== list.length) { saveInkPage(keep); drawInk(); }
   }
-  function undo() { const list = inkPage(); if (!list.length) { flash('Trang này chưa có nét nào.'); return; } list.pop(); saveInkPage(list); drawInk(); }
+  // Hoàn tác: lần xóa nét (trang / cả PDF) gần nhất thì khôi phục đủ các nét đã xóa; không thì bỏ nét cuối của trang đang xem (như cũ).
+  function undo() {
+    const top = st.undo[st.undo.length - 1];
+    if (top && top.kind === 'clear' && st.file && top.file === st.file.id) {
+      st.undo.pop();
+      const a = inkAll();
+      const all = (a[top.file] = a[top.file] || {});
+      let n = 0;
+      for (const [p, list] of Object.entries(top.saved)) { all[p] = list.concat(all[p] || []); n += list.length; }
+      saveJSON(INK_KEY, a);
+      st.inkKB = Math.round((localStorage.getItem(INK_KEY) || '').length / 1024 * 10) / 10;
+      drawInk(); status();
+      const np = Object.keys(top.saved).length;
+      log(`Hoàn tác xóa nét: khôi phục ${n} nét (${np === 1 ? `trang ${Object.keys(top.saved)[0]}` : `${np} trang`}) của ${st.file.name}.`);
+      flash(`Đã khôi phục ${n} nét.`, 3000);
+      return;
+    }
+    if (top && top.kind === 'stroke') st.undo.pop();
+    const list = inkPage(); if (!list.length) { flash('Trang này chưa có nét nào.'); return; } list.pop(); saveInkPage(list); drawInk();
+  }
+  // m6-2: "Xóa nét…": chọn trang này hoặc cả PDF đang mở, hộp hỏi ghi số nét; Hoàn tác khôi phục. Đồng bộ: trang bị xóa nét
+  // để lại dấu đã xóa (sync.js) nên máy kia cũng mất nét và nét không "sống lại".
+  function inkCounts() {
+    const all = (st.file && inkAll()[st.file.id]) || {};
+    const pages = Object.keys(all).filter((p) => (all[p] || []).length);
+    return { all, page: (all[st.page] || []).length, pages, total: pages.reduce((s, p) => s + all[p].length, 0) };
+  }
+  function clearInkAsk() {
+    if (!st.doc) return;
+    const c = inkCounts();
+    if (!c.total) { flash('PDF này chưa có nét nào.'); return; }
+    banner(`Xóa nét: <button class="small" id="v-clr-page"${c.page ? '' : ' disabled'}>Trang này (${c.page} nét)</button> ` +
+      `<button class="small" id="v-clr-all">Cả PDF này (${c.total} nét, ${c.pages.length} trang)</button> <button class="small secondary" id="v-clr-no">Thôi</button>`);
+    $('v-clr-page').onclick = () => clearInk('page');
+    $('v-clr-all').onclick = () => clearInk('all');
+    $('v-clr-no').onclick = () => banner('');
+  }
+  function clearInk(scope) {
+    banner('');
+    if (!st.doc) return;
+    const a = inkAll();
+    const all = a[st.file.id] || {};
+    const pages = scope === 'page' ? [String(st.page)] : Object.keys(all);
+    const saved = {};
+    let n = 0;
+    for (const p of pages) if ((all[p] || []).length) { saved[p] = all[p]; n += all[p].length; }
+    if (!n) { flash('Không có nét nào để xóa.'); return; }
+    const np = Object.keys(saved).length;
+    const what = scope === 'page' ? `${n} nét trên trang ${st.page}` : `${n} nét trên ${np} trang của cả PDF này (${st.file.name})`;
+    if (!confirm(`Xóa ${what}?\n\nBấm "Hoàn tác" để lấy lại. Đang bật đồng bộ thì máy kia cũng mất các nét này sau lần đồng bộ tới.`)) return;
+    for (const p of Object.keys(saved)) delete all[p];
+    if (Object.keys(all).length) a[st.file.id] = all; else delete a[st.file.id];
+    saveJSON(INK_KEY, a);
+    st.inkKB = Math.round((localStorage.getItem(INK_KEY) || '').length / 1024 * 10) / 10;
+    pushUndo({ kind: 'clear', file: st.file.id, saved });
+    drawInk(); status();
+    log(`Xóa nét: ${what}.`);
+    flash(`Đã xóa ${n} nét. Bấm "Hoàn tác" để lấy lại.`, 4000);
+  }
 
   // ---------- Đánh dấu khoảng trang (chỉ ở chế độ ôn tập) ----------
   function renderMarks() {
@@ -767,9 +998,10 @@
     if (v === 'close') close();
     if (v === 'prev') go(st.page, -1);
     if (v === 'next') go(st.page, +1);
-    if (v === 'zoomin' && st.zoom < ZOOMS.length - 1) { st.zoom++; render(); }
-    if (v === 'zoomout' && st.zoom > 0) { st.zoom--; render(); }
+    if (v === 'zoomin') zoomStep(+1);
+    if (v === 'zoomout') zoomStep(-1);
     if (v === 'undo') undo();
+    if (v === 'clearink') clearInkAsk();
     // m4-1 (việc tồn 2): mở khung thì cuộn về đầu, để dòng chọn phần và nút "Đánh dấu" luôn thấy ngay.
     if (v === 'marks' && st.mode !== 'exam') { const p = $('v-marks'); p.hidden = !p.hidden; if (!p.hidden) { renderMarks(); p.scrollTop = 0; } }
     if (v === 'keys' && window.Answers && st.mode !== 'exam') Answers.toggleKeys();

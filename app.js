@@ -3,7 +3,7 @@
 'use strict';
 
 const CFG = window.APP_CONFIG;
-const APP_VERSION = 'm6-1';   // m5-2b mục a: ghi số bản vào dòng "Mở app" của nhật ký. Đổi cùng VERSION trong sw.js.
+const APP_VERSION = 'm6-2';   // m5-2b mục a: ghi số bản vào dòng "Mở app" của nhật ký. Đổi cùng VERSION trong sw.js.
 window.APP_VERSION = APP_VERSION;
 const DRIVE = 'https://www.googleapis.com/drive/v3/';
 const AUTH_KEY = 'ielts.auth';
