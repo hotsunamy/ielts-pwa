@@ -265,3 +265,23 @@ details.mlist ul { columns: 2; margin: 4px 0; }
   .vside.kb .kbr .aclock { font-size: 12px; max-width: 30vw; overflow: hidden; text-overflow: ellipsis; }
   details.mlist ul { columns: 1; }
 }
+
+/* m6-1: đồng bộ giữa các máy */
+.tag[hidden] { display: none; }
+.tag.ok { color: var(--ok); border-color: currentColor; }
+#sync-name { font-size: 16px; }
+header { flex-wrap: wrap; row-gap: 6px; }
+
+/* m6-1: lật trang bằng cách kéo; nút ‹ › trượt trang mới vào */
+.vscroll { touch-action: pan-y pinch-zoom; }
+.vflip { position: absolute; z-index: 4; overflow: hidden; pointer-events: none; }
+.vflip[hidden] { display: none; }
+.vflip canvas { position: absolute; top: 0; left: 0; will-change: transform; }
+.vflip.anim canvas { transition: transform .2s ease-out; }
+.vbox.slide-l { animation: vslide-l .2s ease-out; }
+.vbox.slide-r { animation: vslide-r .2s ease-out; }
+@keyframes vslide-l { from { transform: translateX(32px); opacity: .4; } to { transform: none; opacity: 1; } }
+@keyframes vslide-r { from { transform: translateX(-32px); opacity: .4; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .vbox.slide-l, .vbox.slide-r { animation: none; } .vflip.anim canvas { transition: none; } }
+.vscroll.sliding { overflow-x: hidden; }
+.vscroll.vzoom { touch-action: pinch-zoom; }   /* m6-1: phóng to thì app tự cuộn theo ngón tay (cả 2 chiều) để còn lật được ở mép trang */

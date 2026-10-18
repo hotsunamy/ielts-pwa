@@ -28,7 +28,7 @@
   const fmt = (s) => { if (!isFinite(s) || s < 0) s = 0; s = Math.floor(s); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
   const mb = (n) => (n / 1e6).toFixed(1) + ' MB';
   function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (_) { return d; } }
-  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { log('Không lưu được vào máy: ' + e.message); } }
+  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); if (window.Sync) Sync.touched(k); } catch (e) { log('Không lưu được vào máy: ' + e.message); } }
 
   const st = {
     open: false, mode: 'review', book: null, data: null, test: 1, part: 1,
@@ -139,12 +139,16 @@
     else note('Luyện: được dừng, tua, đổi tốc độ. Hết Part tự sang Part sau.', 'hint');
   }
   // m5-2: sau khi nộp bài Listening thi thử, chuyển thanh audio sang ôn tập (tua, tốc độ, A-B) ở đúng Test và Part đang nghe.
+  // m5-2b mục c: giữ vị trí đang nghe (trước đây về 0:00), bấm Phát là nghe tiếp từ đó để soát.
   function toReview() {
     if (!st.open || st.mode !== 'exam') return;
     const part = (st.list[st.idx] && st.list[st.idx].part) || 1;
+    const pos = examPos();
+    const dur = st.loaded ? audio().duration || 0 : 0;
     openPractice(st.book, st.test);
     if (part > 1 && !st.data.byTest) { $('ap-part').value = part; pick(st.test, part); }
-    note('Đã nộp bài: thanh audio chuyển sang ôn tập (tua, tốc độ, lặp A-B) để soát lại.', 'hint');
+    if (pos && pos.t > 0 && st.cur && st.cur.file) { st.resumeAt = pos.t; st.resumeDur = dur; onTime(); }
+    note(`Đã nộp bài: thanh audio chuyển sang ôn tập (tua, tốc độ, lặp A-B) để soát lại${pos && pos.t > 0 ? `; bấm Phát để nghe tiếp từ ${fmt(pos.t)}` : ''}.`, 'hint');
     log(`Audio: đã nộp bài, chuyển sang ôn tập Cam ${st.book} Test ${st.test}.`);
   }
   // m5-2: vị trí đang nghe khi làm đề (để mở lại app thì nghe tiếp đúng chỗ), và đặt lại vị trí đó.
@@ -269,7 +273,7 @@
     file = file || (d.byTest ? d.get(test) : d.get(test, part));
     st.test = test; st.part = part || 1;
     st.cur = { file, test, part, label: label(test, part, file) };
-    st.loaded = false; st.method = null; st.resumeAt = null; st.lastTime = 0; st.prog = false; st.seekT = null; st.midErr = false;
+    st.loaded = false; st.method = null; st.resumeAt = null; st.resumeDur = 0; st.lastTime = 0; st.prog = false; st.seekT = null; st.midErr = false;
     const a = audio();
     a.removeAttribute('src'); try { a.load(); } catch (_) {}
     $('ap-title').textContent = st.cur.label;
@@ -573,8 +577,11 @@
     if (!a.seeking) st.lastTime = t;
     if (st.mode === 'review' && st.loop.b != null && t >= st.loop.b) { st.prog = true; a.currentTime = st.loop.a; }
     if (!st.dragging) {
-      $('ap-time').textContent = `${fmt(t)} / ${fmt(dur)}`;
-      $('ap-seek').value = dur ? Math.round(t / dur * 1000) : 0;
+      // m5-2b mục c: chưa nạp file mà đã có chỗ nghe tiếp (vd sau khi nộp bài) thì hiện chỗ đó, không hiện 0:00.
+      const wait = !st.loaded && st.resumeAt > 0;
+      const st_ = wait ? st.resumeAt : t, sd = wait ? (st.resumeDur || 0) : dur;
+      $('ap-time').textContent = `${fmt(st_)} / ${sd || !wait ? fmt(sd) : '…'}`;
+      $('ap-seek').value = sd ? Math.round(st_ / sd * 1000) : 0;
     }
   }
   function onSeeking() {

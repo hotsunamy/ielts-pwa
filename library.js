@@ -1,5 +1,5 @@
 // Mốc 2 (+ mốc 3: nút Mở PDF): quét thư mục CAMBRIDGE trên Drive, nhận diện file, bảng xác nhận và sửa tay.
-// Kết quả quét và chỗ sửa tay lưu trong máy (localStorage). Mốc 6 chuyển chỗ sửa tay sang Drive.
+// Kết quả quét và chỗ sửa tay lưu trong máy (localStorage). m6-1: chỗ sửa tay (ielts.libcfg) đồng bộ giữa các máy qua sync.js; kết quả quét thì không (quét lại được).
 'use strict';
 (function () {
   const SCAN_KEY = 'ielts.scan';
@@ -18,7 +18,7 @@
   const openBooks = new Set();   // quyển đang mở, giữ nguyên khi vẽ lại
 
   function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (_) { return d; } }
-  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { log('Không lưu được vào máy: ' + e.message); } }
+  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); if (window.Sync) Sync.touched(k); } catch (e) { log('Không lưu được vào máy: ' + e.message); } }
   function getCfg() {
     const c = loadJSON(CFG_KEY, {});
     c.files = c.files || {}; c.books = c.books || {}; c.keywords = c.keywords || {};

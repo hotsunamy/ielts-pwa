@@ -3,6 +3,8 @@
 'use strict';
 
 const CFG = window.APP_CONFIG;
+const APP_VERSION = 'm6-1';   // m5-2b mục a: ghi số bản vào dòng "Mở app" của nhật ký. Đổi cùng VERSION trong sw.js.
+window.APP_VERSION = APP_VERSION;
 const DRIVE = 'https://www.googleapis.com/drive/v3/';
 const AUTH_KEY = 'ielts.auth';
 const STATE_KEY = 'ielts.oauthState';
@@ -65,6 +67,7 @@ function acceptToken({ access_token, expires_in, scope }, via) {
   const prev = loadAuth();
   saveAuth({ token: access_token, expiresAt: Date.now() + Number(expires_in) * 1000, scope, via, at: Date.now(), email: prev && prev.email });
   while (tokenWaiters.length) tokenWaiters.shift()(true);
+  try { window.dispatchEvent(new Event('ielts-token')); } catch (_) {}   // m6-1: đồng bộ đang chờ token thì chạy tiếp
   log(`Nhận token qua ${via}, hạn ${Math.round(expires_in / 60)} phút.` +
       (missing.length ? ` THIẾU quyền: ${missing.map(shortScope).join(', ')}` : ' Đủ quyền.'));
 }
@@ -312,6 +315,7 @@ function renderAuth() {
   $('btn-expire').disabled = !ok;
   $('btn-logout').disabled = !a;
   if (window.Library) window.Library.onAuth(!!a);
+  if (window.Sync) window.Sync.render();
   clearTimeout(countdown);
   if (a) countdown = setTimeout(renderAuth, 30_000);
 }
@@ -321,7 +325,7 @@ function isStandalone() {
 }
 
 function init() {
-  $('mode').textContent = isStandalone() ? 'Đang chạy dạng app đã cài' : 'Đang chạy trong trình duyệt';
+  $('mode').textContent = (isStandalone() ? 'Đang chạy dạng app đã cài' : 'Đang chạy trong trình duyệt') + ` · bản ${APP_VERSION}`;
   renderLog();
   handleRedirectReturn();
   syncAuthToSW();
@@ -353,7 +357,7 @@ function init() {
     }
   }
   const swState = !('serviceWorker' in navigator) ? 'không có service worker' : navigator.serviceWorker.controller ? 'service worker đang điều khiển' : 'service worker chưa điều khiển, đang nhờ nhận';
-  log(`Mở app (${isStandalone() ? 'đã cài' : 'trình duyệt'}, ${navigator.userAgent.match(/iPhone|iPad|Android|Mac|Windows/)?.[0] || 'khác'}; ${swState}).`);
+  log(`Mở app bản ${APP_VERSION} (${isStandalone() ? 'đã cài' : 'trình duyệt'}, ${navigator.userAgent.match(/iPhone|iPad|Android|Mac|Windows/)?.[0] || 'khác'}; ${swState}).`);
   loadGis();
 }
 init();

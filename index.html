@@ -16,6 +16,7 @@
   <header>
     <h1>Luyện IELTS</h1>
     <span id="mode" class="tag"></span>
+    <span id="sync-chip" class="tag" hidden></span>
   </header>
 
   <main>
@@ -34,6 +35,23 @@
       <p class="hint">Nếu nút đầu không mở được cửa sổ đăng nhập (hay gặp khi app đã cài lên màn hình chính trên iPhone/iPad), dùng nút thứ hai.</p>
     </section>
 
+    <section class="card" id="sync-card">
+      <h2>Đồng bộ giữa các máy</h2>
+      <p id="sync-status"></p>
+      <div class="row">
+        <label>Tên máy <input id="sync-name" size="10" maxlength="30"></label>
+        <button id="sync-enable" disabled>Bật đồng bộ trên máy này</button>
+        <button id="sync-now" class="secondary" hidden>Đồng bộ ngay</button>
+        <button id="sync-off" class="secondary small" hidden>Tắt trên máy này</button>
+      </div>
+      <p class="hint">Mốc trang, đáp án, bài làm, sửa tay ở Thư viện, mốc audio và nét vẽ được lưu vào vùng dữ liệu ẩn của app trên Drive của bạn (không hiện trong Drive, chỉ app này đọc được), để máy kia dùng luôn. Tự đồng bộ khi mở app, khi quay lại app, sau mỗi thay đổi và khi rời app.</p>
+      <details class="tech">
+        <summary>Dữ liệu trên Drive</summary>
+        <button id="sync-files" class="small secondary">Xem các file trong vùng ẩn</button>
+        <pre id="sync-files-out" class="probe"></pre>
+      </details>
+    </section>
+
     <section class="card" id="drive-card">
       <h2>2. Kiểm tra Drive</h2>
       <button id="btn-check" disabled>Kiểm tra</button>
@@ -46,7 +64,7 @@
         <button id="btn-scan" disabled>Quét Drive</button>
         <button id="btn-export" class="secondary">Xuất kết quả (TSV)</button>
       </div>
-      <p class="hint">Quét toàn bộ thư mục CAMBRIDGE, tự nhận Quyển / Test / Part. Bấm vào từng quyển để xem và sửa. Chỗ sửa được nhớ trong máy này.</p>
+      <p class="hint">Quét toàn bộ thư mục CAMBRIDGE, tự nhận Quyển / Test / Part. Bấm vào từng quyển để xem và sửa. Chỗ sửa được nhớ trong máy này, và sang máy khác nếu đã bật đồng bộ.</p>
       <div id="lib-result"></div>
     </section>
 
@@ -100,6 +118,7 @@
 
   <script src="config.js"></script>
   <script src="app.js"></script>
+  <script src="sync.js"></script>
   <script src="recognize.js"></script>
   <script src="library.js"></script>
   <script src="sections.js"></script>

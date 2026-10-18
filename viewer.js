@@ -1,6 +1,6 @@
 // Mốc 3: trình xem PDF theo đoạn trang, cờ chế độ (ôn tập / làm đề), đánh dấu khoảng trang, lớp highlight vẽ đè.
 // Trang PDF được vẽ ra ảnh (canvas) vì map và chart trong sách là ảnh bitmap. Không có nội dung Cambridge trong code.
-// Cấu hình trang và nét vẽ lưu trong máy (localStorage) tới mốc 6 thì đồng bộ lên Drive.
+// Cấu hình trang và nét vẽ lưu trong máy (localStorage); m6-1: đồng bộ giữa các máy qua sync.js (vùng dữ liệu ẩn trên Drive).
 'use strict';
 (function () {
   const PCFG_KEY = 'ielts.pdfcfg';   // {[fileId]: {marks: {key: trang PDF}, offset: lệch số trang in, lastPage}}
@@ -17,13 +17,14 @@
     segs: [], allowed: [], tool: 'view', seq: 0, task: null, pageObj: null, ink: null, H: 1414, drawing: null, detect: null,
     style: 'mock',     // m5-2: làm đề kiểu 'mock' (Thi thử: giờ, không dừng tay) hoặc 'practice' (Luyện: có phiếu và chấm, dừng/tua tự do)
     pen: false, pan: null,   // m5-2 mục 3.8: đã thấy bút (Apple Pencil) thì lớp vẽ chỉ nhận nét bút, ngón tay để cuộn
+    peek: new Map(), peekSeq: 0, peekW: 0, flip: null, flipAnim: false, slideDir: 0,   // m6-1: lật trang bằng cách kéo
   };
   const PEN_KEY = 'ielts.pen';
   const STYLE = { mock: 'Thi thử', practice: 'Luyện' };
 
   // ---------- Lưu trong máy ----------
   function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (_) { return d; } }
-  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { log('Không lưu được vào máy: ' + e.message); return false; } }
+  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); if (window.Sync) Sync.touched(k); return true; } catch (e) { log('Không lưu được vào máy: ' + e.message); return false; } }
   function pcfg(id) { const all = loadJSON(PCFG_KEY, {}); const c = all[id] || {}; c.marks = c.marks || {}; return c; }
   function setPcfg(id, c) { const all = loadJSON(PCFG_KEY, {}); all[id] = c; saveJSON(PCFG_KEY, all); }
   const printed = (p) => { const c = st.file && pcfg(st.file.id); return c && Number.isInteger(c.offset) ? p - c.offset : null; };
@@ -59,6 +60,7 @@
   <div id="v-marks" class="vpanel" hidden></div>
   <div class="vmain">
     <div id="v-scroll" class="vscroll"><div id="v-box" class="vbox"><svg id="v-ink" class="vink" preserveAspectRatio="none"></svg></div></div>
+    <div id="v-flip" class="vflip" hidden></div>
     <div id="v-side" class="vside" hidden></div>
     <div id="v-cover" class="vcover" hidden></div>
   </div>
@@ -75,6 +77,12 @@
     ink.addEventListener('pointermove', inkMove);
     ink.addEventListener('pointerup', inkUp);
     ink.addEventListener('pointercancel', inkUp);
+    // m6-1: kéo ngang bằng ngón tay để lật trang (trang trượt theo tay). Kéo dọc vẫn cuộn.
+    const sc = $('v-scroll');
+    sc.addEventListener('pointerdown', flipDown);
+    sc.addEventListener('pointermove', flipMove);
+    sc.addEventListener('pointerup', flipUp);
+    sc.addEventListener('pointercancel', flipCancelEv);
     window.addEventListener('keydown', (e) => {
       if ($('viewer').hidden || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
       if (e.key === 'ArrowRight' || e.key === 'PageDown') { go(st.page, +1); e.preventDefault(); }
@@ -207,6 +215,7 @@
     try { if (st.task) st.task.cancel(); } catch (_) {}
     if (st.src) { try { await st.src.close(); } catch (_) {} }
     st.src = null; st.doc = null; st.pageObj = null; st.task = null;
+    clearPeek(); flipReset();
     const c = $('v-box') && $('v-box').querySelector('canvas');
     if (c) { c.width = 0; c.height = 0; c.remove(); }
   }
@@ -251,9 +260,10 @@
     }
     if (!S.canView(st.segs, st.mode, st.segKey, target, st.num)) { flash('Không xem được trang này ở chế độ làm đề.'); syncNav(); return; }
     if (target === st.page && dir) { syncNav(); return; }
+    st.slideDir = dir && Math.abs(target - st.page) <= 3 ? Math.sign(target - st.page) : 0;   // nút ‹ › / phím mũi tên: trang mới trượt vào
     st.page = target;
     $('v-scroll').scrollTop = 0;
-    render();
+    return render();
   }
 
   let flashT = null;
@@ -306,7 +316,17 @@
     if (old) { old.width = 0; old.height = 0; old.remove(); }
     box.style.width = cssW + 'px'; box.style.height = cssH + 'px';
     st.renderedW = $('v-scroll').clientWidth;
+    $('v-scroll').classList.toggle('vzoom', st.zoom > 0);
     box.insertBefore(canvas, $('v-ink'));
+    // Trượt trang mới vào (0,2 s). Chỉ khi chưa phóng to; tạm ẩn thanh cuộn ngang để trang trượt không làm hiện thanh cuộn.
+    if (st.slideDir && st.zoom === 0) {
+      const sc = $('v-scroll');
+      box.classList.remove('slide-l', 'slide-r'); void box.offsetWidth;
+      sc.classList.add('sliding');
+      box.classList.add(st.slideDir > 0 ? 'slide-l' : 'slide-r');
+      clearTimeout(st.slideT); st.slideT = setTimeout(() => { sc.classList.remove('sliding'); box.classList.remove('slide-l', 'slide-r'); }, 260);
+    }
+    st.slideDir = 0;
     if (st.pageObj && st.pageObj !== page) { try { st.pageObj.cleanup(); } catch (_) {} }
     st.pageObj = page;
     st.lastRender = { ms: Math.round(performance.now() - t0), w: canvas.width, h: canvas.height };
@@ -317,6 +337,7 @@
     if (st.mode === 'review') { const c = pcfg(st.file.id); c.lastPage = n; setPcfg(st.file.id, c); }
     if (st.mode === 'review' && window.Answers && Answers.onPage) Answers.onPage(n);   // m5-2: nhớ trang đáp án theo phần
     prefetch(n);
+    schedulePeek();
   }
 
   // Tải sẵn dữ liệu trang kế tiếp (chỉ trang được xem) để lật trang nhanh hơn.
@@ -325,6 +346,187 @@
     if (!next) return;
     const doc = st.doc;
     try { const p = await doc.getPage(next); if (doc !== st.doc) return; await p.getOperatorList(); if (p !== st.pageObj) p.cleanup(); } catch (_) {}
+  }
+
+  // ---------- Lật trang bằng cách kéo (m6-1) ----------
+  // Điện thoại / iPad: kéo ngang thì trang trượt theo tay, trang kế lộ ra bên cạnh (đã vẽ sẵn); thả quá 1/4 bề ngang hoặc vuốt nhanh
+  // thì sang trang, không thì bật về. Kéo dọc vẫn cuộn (khung đặt touch-action: pan-y, trình duyệt tự cuộn dọc). Đang bật Highlight /
+  // Gạch chân (không có bút) thì ngón tay vẽ, không lật. Chế độ bút iPad: ngón tay cuộn và lật (app tự cuộn vì lớp vẽ chặn cử chỉ).
+  // Đang phóng to: kéo ngang là di chuyển trong trang; chỉ lật khi lúc bắt đầu kéo đã ở mép trang. Làm đề: trang ngoài phần thì bật về.
+  const touchy = () => (navigator.maxTouchPoints || 0) > 0 || (window.matchMedia && matchMedia('(pointer: coarse)').matches);
+  const FLIP_LOCK = 10, FLIP_FLING = 0.5, FLIP_MS = 200;
+  function neighbor(dir) {
+    if (!st.doc) return null;
+    if (st.mode === 'exam') {
+      const a = st.allowed;
+      const t = dir > 0 ? a.find((p) => p > st.page) : [...a].reverse().find((p) => p < st.page);
+      return t == null ? null : t;
+    }
+    const t = st.page + dir;
+    if (t < 1 || t > st.num) return null;
+    return S.canView(st.segs, st.mode, st.segKey, t, st.num) ? t : null;
+  }
+  function clearPeek() { st.peekSeq++; for (const v of st.peek.values()) { if (v.canvas) v.canvas.width = 0; } st.peek.clear(); }
+  let peekT = null;
+  function schedulePeek() {
+    if (!touchy()) return;
+    clearTimeout(peekT);
+    peekT = setTimeout(() => {
+      const w = Math.max(200, $('v-scroll').clientWidth - 16);
+      if (w !== st.peekW) { clearPeek(); st.peekW = w; }
+      const want = [neighbor(-1), neighbor(+1)].filter((x) => x != null);
+      for (const k of [...st.peek.keys()]) if (!want.includes(k)) { const v = st.peek.get(k); if (v.canvas) v.canvas.width = 0; st.peek.delete(k); }
+      for (const n of want) if (!st.peek.has(n)) renderPeek(n);
+    }, 250);
+  }
+  // Vẽ sẵn trang kế (vừa bề ngang, như mức phóng 100%) để lúc kéo không thấy khoảng trắng. Độ nét thấp hơn trang chính một chút.
+  async function renderPeek(n) {
+    const my = st.peekSeq, doc = st.doc;
+    const entry = { n, canvas: null, ready: null };
+    st.peek.set(n, entry);
+    entry.ready = (async () => {
+      try {
+        const page = await doc.getPage(n);
+        if (my !== st.peekSeq || doc !== st.doc) return null;
+        const base = page.getViewport({ scale: 1 });
+        const cssW = Math.max(200, $('v-scroll').clientWidth - 16);
+        const cssH = Math.round(cssW * base.height / base.width);
+        let px = (cssW / base.width) * Math.min(window.devicePixelRatio || 1, 1.5);
+        if (base.width * base.height * px * px > 4e6) px = Math.sqrt(4e6 / (base.width * base.height));
+        const vp = page.getViewport({ scale: px });
+        const c = document.createElement('canvas');
+        c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+        await page.render({ canvasContext: c.getContext('2d', { alpha: false }), viewport: vp }).promise;
+        if (my !== st.peekSeq || st.peek.get(n) !== entry) { c.width = 0; return null; }
+        entry.canvas = c; entry.cssW = cssW; entry.cssH = cssH;
+        if (st.flip && st.flip.target === n) drawFlipNb();
+        return entry;
+      } catch (_) { return null; }
+    })();
+  }
+  function flipDown(e) {
+    if (e.pointerType !== 'touch' || !st.doc || st.flipAnim || st.flip || $('viewer').hidden) return;
+    if (st.tool !== 'view' && !st.pen) return;   // đang vẽ bằng ngón tay
+    const sc = $('v-scroll');
+    const maxL = Math.max(0, sc.scrollWidth - sc.clientWidth);
+    // Tự cuộn (manual): chế độ bút trên lớp vẽ, hoặc đang phóng to (khung tắt cuộn của trình duyệt để kéo chéo vẫn đi cả 2 chiều).
+    st.flip = { id: e.pointerId, x0: e.clientX, y0: e.clientY, lock: null, manual: st.tool !== 'view' || e.target === $('v-ink') || sc.classList.contains('vzoom'),
+      sl: sc.scrollLeft, st0: sc.scrollTop, maxL, atL: sc.scrollLeft <= 1, atR: sc.scrollLeft >= maxL - 1,
+      off: 0, dir: 0, target: null, shown: false, lx: e.clientX, lt: performance.now(), v: 0 };
+  }
+  function flipMove(e) {
+    const g = st.flip;
+    if (!g || e.pointerId !== g.id) return;
+    const dx = e.clientX - g.x0, dy = e.clientY - g.y0;
+    const t = performance.now();
+    if (t > g.lt) { g.v = 0.6 * ((e.clientX - g.lx) / (t - g.lt)) + 0.4 * g.v; g.lx = e.clientX; g.lt = t; }
+    if (!g.lock) {
+      if (Math.hypot(dx, dy) < FLIP_LOCK) return;
+      g.lock = Math.abs(dx) > Math.abs(dy) * 1.2 ? 'h' : 'v';
+    }
+    const sc = $('v-scroll');
+    if (g.lock === 'v') { if (g.manual) { e.preventDefault(); sc.scrollTop = g.st0 - dy; sc.scrollLeft = g.sl - dx; } return; }
+    e.preventDefault();
+    // Phóng to: trước hết di chuyển trong trang; tới mép thì phần kéo dư mới dùng để lật (chỉ khi lúc bắt đầu đã ở mép đó).
+    const want = g.sl - dx;
+    let off = 0;
+    if (want < 0) { sc.scrollLeft = 0; off = g.atL ? -want : 0; }
+    else if (want > g.maxL) { sc.scrollLeft = g.maxL; off = g.atR ? g.maxL - want : 0; }
+    else sc.scrollLeft = want;
+    const dir = off > 0 ? -1 : off < 0 ? 1 : 0;
+    if (!dir) { if (g.shown) setFlipPos(0); g.off = 0; return; }
+    if (dir !== g.dir) { g.dir = dir; g.target = neighbor(dir); if (!g.shown) showFlip(); drawFlipNb(); }
+    g.off = off;
+    setFlipPos(g.target != null ? off : off * 0.25);
+  }
+  function flipUp(e) {
+    const g = st.flip;
+    if (!g || e.pointerId !== g.id) return;
+    if (g.lock !== 'h' || !g.shown) { flipReset(); return; }
+    const w = $('v-scroll').clientWidth;
+    const fling = Math.abs(g.v) > FLIP_FLING && Math.sign(g.v) === Math.sign(g.off) && Math.abs(g.off) > 30;
+    if (g.target != null && (Math.abs(g.off) > w / 4 || fling)) commitFlip(g);
+    else {
+      if (g.target == null && Math.abs(g.off) > w / 6) flash(st.mode === 'exam' ? (g.dir > 0 ? 'Hết trang của phần đang làm.' : 'Đây là trang đầu của phần đang làm.') : (g.dir > 0 ? 'Đây là trang cuối.' : 'Đây là trang đầu.'));
+      animFlip(0, () => flipReset());
+    }
+  }
+  function flipCancelEv(e) {
+    const g = st.flip;
+    if (!g || e.pointerId !== g.id) return;
+    if (g.shown) animFlip(0, () => flipReset()); else flipReset();
+  }
+  function showFlip() {
+    const g = st.flip, sc = $('v-scroll'), fl = $('v-flip');
+    const w = sc.clientWidth, h = sc.clientHeight, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    Object.assign(fl.style, { left: sc.offsetLeft + 'px', top: sc.offsetTop + 'px', width: w + 'px', height: h + 'px' });
+    const bg = getComputedStyle(sc).backgroundColor;
+    const mk = () => { const c = document.createElement('canvas'); c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); c.style.width = w + 'px'; c.style.height = h + 'px'; return c; };
+    const cur = mk(), nb = mk();
+    cur.className = 'fcur'; nb.className = 'fnb';
+    const x = cur.getContext('2d');
+    x.fillStyle = bg && bg !== 'rgba(0, 0, 0, 0)' ? bg : '#888'; x.fillRect(0, 0, cur.width, cur.height);
+    const src = $('v-box').querySelector('canvas');
+    if (src && src.width) {
+      const br = $('v-box').getBoundingClientRect(), sr = sc.getBoundingClientRect();
+      x.drawImage(src, (br.left - sr.left) * dpr, (br.top - sr.top) * dpr, br.width * dpr, br.height * dpr);
+    }
+    fl.innerHTML = ''; fl.append(nb, cur);
+    g.shown = true; g.w = w; g.h = h; g.dpr = dpr; g.bg = x.fillStyle;
+    fl.hidden = false;
+    $('v-box').style.visibility = 'hidden';
+  }
+  // Vẽ trang kế vào lớp lật: dùng bản đã vẽ sẵn; chưa có thì vẽ khung trắng + số trang và vẽ ngay (xong thì thay vào).
+  function drawFlipNb() {
+    const g = st.flip; if (!g || !g.shown) return;
+    const nb = $('v-flip').querySelector('.fnb'); if (!nb) return;
+    const x = nb.getContext('2d'), d = g.dpr;
+    x.fillStyle = g.bg; x.fillRect(0, 0, nb.width, nb.height);
+    g.nbReady = false;
+    if (g.target == null) return;
+    const p = st.peek.get(g.target);
+    const left = Math.max(8, (g.w - (p && p.cssW || g.w - 16)) / 2);
+    if (p && p.canvas) {
+      x.drawImage(p.canvas, left * d, 8 * d, p.cssW * d, p.cssH * d);
+      g.nbReady = true;
+    } else {
+      x.fillStyle = '#fff'; x.fillRect(left * d, 8 * d, (g.w - 2 * left) * d, (g.h - 8) * d);
+      x.fillStyle = '#999'; x.font = `${16 * d}px sans-serif`; x.fillText(`Trang ${g.target}…`, (left + 16) * d, 40 * d);
+      if (!p) renderPeek(g.target);
+    }
+  }
+  function setFlipPos(off) {
+    const g = st.flip; if (!g || !g.shown) return;
+    g.pos = off;
+    const fl = $('v-flip');
+    const cur = fl.querySelector('.fcur'), nb = fl.querySelector('.fnb');
+    if (cur) cur.style.transform = `translateX(${off}px)`;
+    if (nb) nb.style.transform = `translateX(${off + (g.dir || 1) * g.w}px)`;
+  }
+  function animFlip(to, done) {
+    const g = st.flip; if (!g) { done(); return; }
+    st.flipAnim = true;
+    const fl = $('v-flip');
+    fl.classList.add('anim');
+    setFlipPos(to);
+    setTimeout(() => { fl.classList.remove('anim'); st.flipAnim = false; done(); }, FLIP_MS + 20);
+  }
+  function commitFlip(g) {
+    const target = g.target, dir = g.dir;
+    animFlip(-dir * g.w, async () => {
+      st.flip = g;   // giữ lớp lật (đang hiện trang mới) tới khi trang mới vẽ xong
+      st.page = target;
+      const sc = $('v-scroll');
+      sc.scrollTop = 0; sc.scrollLeft = 0;
+      try { await render(); } catch (_) {}
+      flipReset();
+    });
+  }
+  function flipReset() {
+    st.flip = null;
+    const fl = $('v-flip');
+    if (fl) { fl.hidden = true; fl.innerHTML = ''; fl.classList.remove('anim'); }
+    const box = $('v-box'); if (box) box.style.visibility = '';
   }
 
   // ---------- Lớp vẽ (highlight, gạch chân, tẩy) ----------
@@ -363,14 +565,8 @@
       log('Lớp vẽ: phát hiện bút, từ giờ chỉ nhận nét bút; ngón tay dùng để cuộn trang.');
       flash('Đã thấy bút: chỉ bút vẽ được, ngón tay để cuộn.', 4000);
     }
-    if (st.pen && e.pointerType === 'touch') {
-      e.preventDefault();
-      if (st.pan) return;
-      const sc = $('v-scroll');
-      st.pan = { id: e.pointerId, x: e.clientX, y: e.clientY, l: sc.scrollLeft, t: sc.scrollTop };
-      try { $('v-ink').setPointerCapture(e.pointerId); } catch (_) {}
-      return;
-    }
+    // m6-1: ngón tay ở chế độ bút do phần kéo-lật-trang xử lý (cuộn dọc, cuộn ngang khi phóng to, kéo ngang để lật trang).
+    if (st.pen && e.pointerType === 'touch') { e.preventDefault(); return; }
     e.preventDefault();
     try { $('v-ink').setPointerCapture(e.pointerId); } catch (_) {}
     st.drawing = { t: st.tool, pts: [inkPt(e)], id: e.pointerId };
@@ -753,6 +949,17 @@
   const isOpen = () => !!$('viewer') && !$('viewer').hidden;
   const goPage = (n) => go(n, 0);
   st.pen = loadJSON(PEN_KEY, false) === true;
+  // m6-1: mốc trang, nét vẽ, chế độ bút vừa đồng bộ về từ máy khác: trình xem đang mở thì vẽ lại theo dữ liệu mới.
+  window.addEventListener('ielts-sync', (e) => {
+    const keys = (e.detail && e.detail.keys) || [];
+    if (keys.includes(PEN_KEY)) st.pen = loadJSON(PEN_KEY, false) === true;
+    if (!isOpen() || !st.doc) return;
+    if (keys.includes(PCFG_KEY)) {
+      loadSegs(); syncNav();
+      if (!$('v-marks').hidden) renderMarks();
+    }
+    if (keys.includes(INK_KEY) && !st.drawing) drawInk();
+  });
   window.Viewer = { open, close, refreshPicker, ctx, isOpen, selFile, goPage, flash, _st: st };
   init();
 })();

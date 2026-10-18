@@ -1,7 +1,7 @@
 // Mốc 5: nhập đáp án (key), phiếu trả lời khi làm đề, nộp bài, chấm, xem kết quả (m5-1);
 // đồng hồ, tạm dừng theo rời app, hỏi tiếp tục/bỏ, tự nộp khi hết giờ, kiểu Thi thử / Luyện, phiếu co khi bàn phím bật,
 // ô gõ bài Writing + nút chấm bằng AI (m5-2).
-// Không có đáp án nào trong code: key do Minh dán/gõ, lưu trong máy (localStorage) tới mốc 6 thì đồng bộ lên Drive.
+// Không có đáp án nào trong code: key do Minh dán/gõ, lưu trong máy (localStorage); m6-1: đồng bộ giữa các máy qua sync.js (vùng ẩn Drive).
 //   ielts.keys     {[quyển]: {[T1L..T4R]: {items: {n: chuỗi}, groups: [[a..b]], checked: [chỉ số cụm đã soát], src, at, edits}}}
 //   ielts.attempts [{id, book, seg, style: 'mock'|'practice', fileId, fileName, startedAt, updatedAt, answers: {n: chuỗi} | {t1, t2, p1, p2} (Writing),
 //                    submittedAt, overrides: {n: true}, score, total, clock (xem clock.js), phase, deadline, timeUsedMs, autoSubmitted,
@@ -31,7 +31,7 @@
 
   // ---------- Lưu trong máy ----------
   function loadJSON(k, d) { try { return JSON.parse(localStorage.getItem(k)) || d; } catch (_) { return d; } }
-  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { L('Không lưu được vào máy: ' + e.message); return false; } }
+  function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); if (window.Sync) Sync.touched(k); return true; } catch (e) { L('Không lưu được vào máy: ' + e.message); return false; } }
   function getKey(book, seg) { const all = loadJSON(KEYS_KEY, {}); return (all[book] || {})[seg] || null; }
   function setKey(book, seg, k) {
     const all = loadJSON(KEYS_KEY, {});
@@ -85,7 +85,11 @@
 
   // ---------- Trạng thái khung bên ----------
   const st = { kind: null, book: null, seg: null, file: null, att: null, style: 'mock', submitted: false, keySeg: null, pollT: null, curPart: null, saveT: null,
-    tickT: null, hidAt: null, cover: null, beatSaved: 0, skipNextPage: false };
+    tickT: null, hidAt: null, cover: null, beatSaved: 0, skipNextPage: false, attBase: 0 };
+  // m6-1: máy này (đồng bộ). Bài làm ghi kèm máy sửa lần cuối, để biết bài đã được làm tiếp ở máy khác.
+  const myDev = () => (window.Sync ? Sync.dev() : 'local');
+  const myName = () => (window.Sync ? Sync.name() : '');
+  const fromOther = (a) => (a && a.dev && a.dev !== myDev() ? ` trên ${a.devName || 'máy khác'}` : '');
 
   function side() { return $('v-side'); }
   function collapsed() { return loadJSON(SIDE_KEY, false) === true; }
@@ -134,7 +138,7 @@
   function newAttempt(seg) {
     const t = now();
     const sk = skillOf(seg);
-    const a = { id: t.toString(36) + Math.random().toString(36).slice(2, 6), book: st.book, seg, style: st.style, fileId: st.file.id, fileName: st.file.name,
+    const a = { id: t.toString(36) + Math.random().toString(36).slice(2, 6), book: st.book, seg, style: st.style, fileId: st.file.id, fileName: st.file.name, dev: myDev(), devName: myName(),
       startedAt: t, updatedAt: t, answers: {}, submittedAt: null, overrides: {}, score: null, total: sk === 'W' ? null : N,
       clock: C.create(st.style, sk === 'L' ? 'listen' : sk === 'R' ? 'read' : 'write', t), skipParts: [] };
     if (sk === 'L' && st.style === 'mock') { const m = missingParts(st.book, testOf(seg)); a.skipParts = m.parts; a.noAudio = m.none; }
@@ -147,7 +151,43 @@
     const t = now();
     a.phase = c.phase; a.deadline = C.deadline(c, t); a.pauses = c.pauses; a.timeUsedMs = C.totalUsed(c, t); a.remainMs = C.remaining(c, t);
   }
-  function save() { if (!st.att) return; st.att.updatedAt = now(); if (st.att.clock) syncFields(st.att); putAttempt(st.att); }
+  function save() {
+    if (!st.att) return;
+    if (checkMoved()) return;
+    st.att.updatedAt = now(); st.att.dev = myDev(); st.att.devName = myName();
+    if (st.att.clock) syncFields(st.att);
+    putAttempt(st.att);
+    st.attBase = st.att.updatedAt;
+  }
+  // m6-1 (Minh chốt 18/10, câu 1a): bài dở được làm tiếp ở máy khác thì bài chuyển sang máy đó. Máy này thấy bản trong máy
+  // (vừa đồng bộ về) mới hơn lần lưu cuối của mình và do máy khác ghi → dừng bài, không ghi đè.
+  function checkMoved() {
+    const a = st.att;
+    if (!a || st.submitted || !(st.kind === 'sheet' || st.kind === 'wsheet')) return false;
+    const cur = attempts().find((x) => x.id === a.id);
+    if (cur && (!cur.dev || cur.dev === myDev() || (cur.updatedAt || 0) <= (st.attBase || 0))) return false;
+    if (!cur && !(window.Sync && Sync.on() && st.attBase)) return false;
+    if (!cur) {   // máy khác đã bỏ bài này (Bỏ bài này, làm lại) và dấu xóa vừa đồng bộ về
+      const any = (window.Sync && Sync._META['ielts.attempts'] || {})[a.id];
+      if (!any || any[1] === myDev()) return false;
+    }
+    moved(cur);
+    return true;
+  }
+  function moved(cur) {
+    const a = st.att, seg = st.seg;
+    stopTick(); stopPoll(); exitKb(); clearTimeout(st.saveT);
+    const who = cur ? (cur.devName || 'máy khác') : 'máy khác';
+    L(`Bài làm ${segLabel(a.book, seg)}: ${cur ? `đã được làm tiếp trên ${who} lúc ${hhmm(cur.updatedAt)}${cur.submittedAt ? ' và đã nộp' : ''}` : `đã bị bỏ trên ${who}`}; máy này dừng bài, không ghi đè.`);
+    st.att = null; st.kind = 'moved';
+    if (window.AudioPlayer && AudioPlayer.isOpen()) { try { $('ap-audio').pause(); } catch (_) {} }
+    const el = $('v-cover'); if (!el) return;
+    st.cover = 'moved';
+    el.innerHTML = `<div class="vc-box"><p><b>${cur ? `Bài này đã được làm tiếp trên ${esc(who)}` : `Bài này đã bị bỏ trên ${esc(who)}`}</b>${cur ? ` lúc ${esc(hhmm(cur.updatedAt))}${isWSeg(seg) ? '' : ` (${filledOf(cur)}/${N} ô)`}${cur.submittedAt ? ', đã nộp' : ''}` : ''}.</p>
+      <p class="hint">Máy này dừng ở đây để không ghi đè phần đã làm ở máy kia. Muốn làm tiếp trên máy này: đóng rồi mở lại phần này.</p>
+      <div class="row"><button data-a="closeviewer">Đóng</button></div></div>`;
+    el.hidden = false;
+  }
   function clockText() {
     const a = st.att, c = a && a.clock;
     if (!a) return '';
@@ -161,7 +201,7 @@
     if (c.phase === 'listen' && st.style === 'mock') {
       const ap = window.AudioPlayer && AudioPlayer._st;
       const part = ap && ap.open && ap.mode === 'exam' && ap.list && ap.list[ap.idx] ? ap.list[ap.idx].part : null;
-      return `Đang nghe${part ? ` · Part ${part}` : ''} · ${C.fmt(C.phaseUsed(c, t))}${C.running(c) ? '' : ' (đang dừng)'}`;
+      return `Đang nghe${part ? ` · Part ${part}` : ''} · đã làm ${C.fmt(C.phaseUsed(c, t))}${C.running(c) ? '' : ' (đang dừng)'}`;   // m5-2b mục b: thời gian từ lúc mở đề, không phải vị trí audio
     }
     return `${STYLE.practice} · đã làm ${C.fmt(C.totalUsed(c, t))}${C.running(c) ? '' : ' (đang dừng)'}`;
   }
@@ -230,7 +270,7 @@
     const left = c && c.limit != null ? `còn ${C.fmt(C.remaining(c, t))}` : c ? `đã làm ${C.fmt(C.totalUsed(c, t))}` : '';
     let html;
     if (kind === 'resume') {
-      html = `<p><b>${esc(segLabel(a.book, a.seg))}</b> (${STYLE[styleOf(a)]}) bắt đầu ${esc(hhmm(a.startedAt))}, chưa nộp.</p>
+      html = `<p><b>${esc(segLabel(a.book, a.seg))}</b> (${STYLE[styleOf(a)]}) bắt đầu ${esc(hhmm(a.startedAt))}${esc(fromOther(a))}, chưa nộp.</p>
         <p>${c ? `Đã làm ${C.fmt(C.totalUsed(c, t))}${c.limit != null ? `, ${left}${c.phase === 'copy' ? ' của 10 phút chép' : ''}` : ''}. ${esc(cap(C.pauseText(c)))}.` : 'Bài này làm từ bản cũ, không tính giờ.'}
           ${isWSeg(a.seg) ? '' : `${filledOf(a)}/${N} ô đã điền.`}</p>
         <p class="vc-q">Tiếp tục hay bỏ bài này?</p>
@@ -246,6 +286,7 @@
   }
   function hideCover() { const el = $('v-cover'); if (el) { el.hidden = true; el.innerHTML = ''; } st.cover = null; }
   function coverContinue() {
+    if (checkMoved()) return;
     const was = st.cover;
     hideCover();
     resumeClock(was === 'resume' ? 'mở lại bài' : 'quay lại app');
@@ -260,6 +301,7 @@
     const b = e.target.closest('button[data-a]'); if (!b) return;
     if (b.dataset.a === 'cont') coverContinue();
     if (b.dataset.a === 'abandon') abandon();
+    if (b.dataset.a === 'closeviewer' && window.Viewer) { hideCover(); Viewer.close(true); }
   }
   // Bấm Phát trên thanh audio khi đồng hồ đang dừng (thi thử Listening): chạy tiếp cùng audio.
   function onAudioPlay() {
@@ -297,6 +339,8 @@
     st.hidAt = null;
     if (ms < HIDE_MIN) { resumeClock('ẩn rất ngắn', HIDE_MIN); return; }
     if (st.style === 'mock') { L(`Bài làm ${segLabel(st.book, st.seg)}: quay lại app sau ${Math.round(ms / 1000)} s, che đề chờ bấm Tiếp tục.`); showCover('pause'); }
+    // Luyện: chạy tiếp ngay, nhưng đang đồng bộ (vừa quay lại app) thì chờ xong (tối đa 3 s) để biết bài có được làm tiếp ở máy khác không.
+    else if (window.Sync && Sync.on()) Sync.whenFresh(3000).then(() => { if (isWork() && !checkMoved()) resumeClock('quay lại app'); });
     else resumeClock('quay lại app');
   }
 
@@ -309,8 +353,8 @@
       if (C.recover(att.clock, now())) L(`Bài làm ${segLabel(st.book, seg)}: app đã bị tắt khi đồng hồ đang chạy, tính là dừng từ ${new Date(att.clock.pausedAt).toLocaleTimeString('vi-VN')}.`);
     }
     if (!att) { att = newAttempt(seg); putAttempt(att); }
-    st.att = att;
-    L(`Bài làm ${segLabel(st.book, seg)} (${STYLE[styleOf(att)]}): ${resumed ? `làm tiếp bài bắt đầu ${hhmm(att.startedAt)} (${filledOf(att)} ô đã điền${att.clock ? `, ${clockText()}` : ', không tính giờ'})` : `bài mới${att.clock && att.clock.limit ? `, đồng hồ ${C.mins(att.clock.limit)} phút` : ''}`}` +
+    st.att = att; st.attBase = att.updatedAt || 0;
+    L(`Bài làm ${segLabel(st.book, seg)} (${STYLE[styleOf(att)]}): ${resumed ? `làm tiếp bài bắt đầu ${hhmm(att.startedAt)}${fromOther(att)} (${filledOf(att)} ô đã điền${att.clock ? `, ${clockText()}` : ', không tính giờ'})` : `bài mới${att.clock && att.clock.limit ? `, đồng hồ ${C.mins(att.clock.limit)} phút` : ''}`}` +
       `${(att.skipParts || []).length ? `, thiếu audio ${partsText(att.skipParts)} (khóa câu ${partsQText(att.skipParts)})` : ''}.`);
     renderSheet(resumed);
     if (skillOf(seg) === 'L' && att.audioPos && window.AudioPlayer && st.style === 'mock') AudioPlayer.examStartAt(att.audioPos);
@@ -395,8 +439,11 @@
     const k = wr ? null : getKey(st.book, st.seg);
     if (k && keyFilled(k)) a.score = gradeAtt(k, a).score;
     a.total = wr ? null : N - skip.size;
+    if (checkMoved()) return;
+    a.dev = myDev(); a.devName = myName(); a.updatedAt = t;
     putAttempt(a);
     st.submitted = true;
+    if (window.Sync) Sync.soon('nộp bài');
     stopPoll();
     const time = a.clock ? `thời gian ${C.usedText(a.clock, t)}, ${C.pauseText(a.clock)}` : `từ lúc bắt đầu tới lúc nộp ${Math.round((t - a.startedAt) / 60000)} phút (không tính giờ)`;
     if (wr) L(`Nộp bài ${segLabel(st.book, st.seg)} (${STYLE[styleOf(a)]}${auto ? ', tự nộp khi hết giờ' : ''}): Task 1 ${C.words(a.answers.t1)} từ, Task 2 ${C.words(a.answers.t2)} từ, ${time}.`);
@@ -421,7 +468,7 @@
     L(`Bài làm ${segLabel(st.book, st.seg)}: bỏ bài bắt đầu ${hhmm(st.att.startedAt)}, làm lại.`);
     hideCover();
     const seg = st.seg;
-    st.att = newAttempt(seg); putAttempt(st.att);
+    st.att = newAttempt(seg); putAttempt(st.att); st.attBase = st.att.updatedAt;
     L(`Bài làm ${segLabel(st.book, seg)} (${STYLE[st.style]}): bài mới${st.att.clock.limit ? `, đồng hồ ${C.mins(st.att.clock.limit)} phút` : ''}.`);
     if (isWSeg(seg)) renderWriting(false); else renderSheet(false);
     if (skillOf(seg) === 'L' && window.AudioPlayer && st.style === 'mock' && AudioPlayer.isOpen()) AudioPlayer.openExam(st.book, testOf(seg));
@@ -486,8 +533,8 @@
     const resumed = !!att;
     if (att && att.clock && C.recover(att.clock, now())) L(`Bài làm ${segLabel(st.book, seg)}: app đã bị tắt khi đồng hồ đang chạy, tính là dừng từ ${new Date(att.clock.pausedAt).toLocaleTimeString('vi-VN')}.`);
     if (!att) { att = newAttempt(seg); putAttempt(att); }
-    st.att = att;
-    L(`Bài làm ${segLabel(st.book, seg)} (${STYLE[styleOf(att)]}): ${resumed ? `làm tiếp bài bắt đầu ${hhmm(att.startedAt)} (${clockText()})` : `bài mới${att.clock.limit ? `, đồng hồ ${C.mins(att.clock.limit)} phút` : ''}`}.`);
+    st.att = att; st.attBase = att.updatedAt || 0;
+    L(`Bài làm ${segLabel(st.book, seg)} (${STYLE[styleOf(att)]}): ${resumed ? `làm tiếp bài bắt đầu ${hhmm(att.startedAt)}${fromOther(att)} (${clockText()})` : `bài mới${att.clock.limit ? `, đồng hồ ${C.mins(att.clock.limit)} phút` : ''}`}.`);
     renderWriting(resumed);
     startTick();
     if (resumed && att.clock) showCover('resume');
@@ -999,6 +1046,14 @@
     refreshCard();
   }
 
-  window.Answers = { onOpen, onClose, blocksClose, preflight, bind, refreshCard, openModal, openKeyFor, toggleKeys, flush, onPage, onAudioPlay, onAudioDone, _st: st };
+  // m6-1: dữ liệu vừa đồng bộ về từ máy khác: cập nhật thẻ Đề; bài đang làm mà đã được làm tiếp ở máy khác thì dừng.
+  function onSynced(e) {
+    const keys = (e && e.detail && e.detail.keys) || [];
+    if (keys.includes(ATT_KEY) && isWork()) checkMoved();
+    if (keys.some((k) => k === ATT_KEY || k === KEYS_KEY || k === PCFG_KEY)) refreshCard();
+  }
+  window.addEventListener('ielts-sync', onSynced);
+  window.Answers = { onOpen, onClose, blocksClose, preflight, bind, refreshCard, openModal, openKeyFor, toggleKeys, flush, onPage, onAudioPlay, onAudioDone,
+    working: () => isWork(), _st: st };
   init();
 })();
