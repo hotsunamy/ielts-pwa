@@ -18,7 +18,7 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   const st = {
-    file: null, src: null, doc: null, num: 0, page: 1, z: 1, zmode: null, ratio: 1.414, pinch: null, undo: [], mode: 'review', segKey: null,
+    file: null, src: null, doc: null, num: 0, page: 1, z: 1, zmode: null, ratio: 1.414, pinch: null, undo: [], redo: [], mode: 'review', segKey: null,
     segs: [], allowed: [], tool: 'view', seq: 0, task: null, pageObj: null, ink: null, H: 1414, drawing: null, detect: null,
     style: 'mock',     // m5-2: làm đề kiểu 'mock' (Thi thử: giờ, không dừng tay) hoặc 'practice' (Luyện: có phiếu và chấm, dừng/tua tự do)
     pen: false, pan: null,   // m5-2 mục 3.8: đã thấy bút (Apple Pencil) thì lớp vẽ chỉ nhận nét bút, ngón tay để cuộn
@@ -56,7 +56,8 @@
     <button class="small tool" data-tool="hl">Highlight</button>
     <button class="small tool" data-tool="ul">Gạch chân</button>
     <button class="small tool" data-tool="erase">Tẩy</button>
-    <button class="small secondary" data-v="undo">Hoàn tác</button>
+    <button class="small secondary" data-v="undo" title="Hoàn tác (Ctrl+Z)">Hoàn tác</button>
+    <button class="small secondary" data-v="redo" id="v-redo" title="Làm lại (Ctrl+Y)" disabled>Làm lại</button>
     <button class="small secondary" data-v="clearink" id="v-clearink">Xóa nét…</button>
     <button class="small secondary" data-v="marks" id="v-marks-btn">Đánh dấu trang</button>
     <button class="small secondary" data-v="audio" id="v-audio-btn">Audio</button>
@@ -105,6 +106,12 @@
     });
     window.addEventListener('keydown', (e) => {
       if ($('viewer').hidden || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+      // m6-3: Ctrl+Z hoàn tác, Ctrl+Y / Ctrl+Shift+Z làm lại (Cmd trên Mac).
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+        if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); return; }
+      }
       if (e.key === 'ArrowRight' || e.key === 'PageDown') { go(st.page, +1); e.preventDefault(); }
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') { go(st.page, -1); e.preventDefault(); }
     });
@@ -141,8 +148,9 @@
     buildDom();
     await closeDoc();
     const zp = zoomPref();
-    Object.assign(st, { file: opts.file, mode: opts.mode || 'review', segKey: opts.segKey || null, tool: 'view', z: zp.z, zmode: zp.mode, pinch: null, undo: [], page: 1, lastRender: null, inkKB: null,
+    Object.assign(st, { file: opts.file, mode: opts.mode || 'review', segKey: opts.segKey || null, tool: 'view', z: zp.z, zmode: zp.mode, pinch: null, undo: [], redo: [], page: 1, lastRender: null, inkKB: null,
       style: opts.style === 'practice' ? 'practice' : 'mock' });
+    updUR();
     $('viewer').hidden = false;
     document.body.classList.add('viewing');
     $('v-title').textContent = (opts.file.book ? `Cam ${opts.file.book} · ` : '') + (st.mode === 'exam' ? S.LABEL[st.segKey] : opts.file.name);
@@ -640,7 +648,7 @@
     const a = tpt(e.touches[0]), b = tpt(e.touches[1]);
     // Đang kéo lật trang / đang vẽ bằng ngón tay: hủy, chuyển sang chụm.
     if (st.flip) { if (st.flipAnim) return; flipReset(); }
-    if (st.drawing) { st.drawing = null; const lv = $('v-live'); if (lv) lv.setAttribute('points', ''); }
+    if (st.drawing) { const d0 = st.drawing; st.drawing = null; const lv = $('v-live'); if (lv) lv.setAttribute('points', ''); if (d0.t === 'erase') commitErase(d0); }
     st.pan = null;
     clearTimeout(zoomT); zoomT = null;
     const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
@@ -739,7 +747,7 @@
     if (st.pen && e.pointerType === 'touch') { e.preventDefault(); return; }
     e.preventDefault();
     try { $('v-ink').setPointerCapture(e.pointerId); } catch (_) {}
-    st.drawing = { t: st.tool, pts: [inkPt(e)], id: e.pointerId };
+    st.drawing = { t: st.tool, pts: [inkPt(e)], id: e.pointerId, page: st.page, before: inkPage() };
     if (st.tool === 'erase') eraseAt(st.drawing.pts[0]);
     else { const live = $('v-live'); live.setAttribute('class', 'ink-' + st.tool); }
   }
@@ -771,7 +779,7 @@
     if (!d || e.pointerId !== d.id) return;
     st.drawing = null;
     $('v-live').setAttribute('points', '');
-    if (d.t === 'erase') return;
+    if (d.t === 'erase') { commitErase(d); return; }
     let pts = d.pts;
     if (pts.length < 2) return;
     // Nét gần như nằm ngang thì kéo thẳng cho gọn (highlight và gạch chân thường theo dòng chữ).
@@ -783,12 +791,53 @@
       pts = [[Math.min(...xs), y], [Math.max(...xs), y]];
     }
     const list = inkPage();
+    const before = list.slice();
     list.push({ t: d.t, p: pts.map((q) => q.join(',')).join(' ') });
     saveInkPage(list);
-    pushUndo({ kind: 'stroke', page: st.page });
+    pushUndo({ kind: 'stroke', file: st.file.id, pages: { [st.page]: [before, list] } });
     drawInk();
   }
-  function pushUndo(a) { st.undo.push(a); if (st.undo.length > 60) st.undo.shift(); }
+  // m6-3: lịch sử thao tác nét (vẽ, tẩy, Xóa nét…) của PDF đang mở. Mỗi bước lưu nét của từng trang bị đổi trước và sau
+  // ({ pages: { trang: [trước, sau] } }); Hoàn tác đặt lại "trước", Làm lại đặt lại "sau". Thao tác mới thì bỏ các bước làm lại.
+  function pushUndo(a) { st.undo.push(a); if (st.undo.length > 60) st.undo.shift(); st.redo = []; updUR(); }
+  function updUR() { const b = $('v-redo'); if (b) b.disabled = !st.redo.length; }
+  function commitErase(d) {
+    if (!st.file || d.page == null) return;
+    const after = ((inkAll()[st.file.id] || {})[d.page]) || [];
+    if (after.length !== d.before.length) pushUndo({ kind: 'erase', file: st.file.id, pages: { [d.page]: [d.before, after] } });
+  }
+  // Ghi nét cho các trang (idx 0 = trước, 1 = sau). Trả về số nét khác nhau.
+  function applyPages(fileId, pages, idx) {
+    const a = inkAll();
+    const all = (a[fileId] = a[fileId] || {});
+    for (const [p, v] of Object.entries(pages)) { if (v[idx].length) all[p] = v[idx]; else delete all[p]; }
+    if (!Object.keys(all).length) delete a[fileId];
+    saveJSON(INK_KEY, a);
+    st.inkKB = Math.round((localStorage.getItem(INK_KEY) || '').length / 1024 * 10) / 10;
+  }
+  function stepTo(entry, idx) {
+    applyPages(entry.file, entry.pages, idx);
+    const ps = Object.keys(entry.pages).map(Number);
+    // Bước ở trang khác (1 trang): nhảy về trang đó cho thấy thay đổi; Xóa cả PDF (nhiều trang) thì ở yên.
+    if (ps.length === 1 && ps[0] !== st.page && S.canView(st.segs, st.mode, st.segKey, ps[0], st.num) && (st.mode !== 'exam' || st.allowed.includes(ps[0]))) go(ps[0], 0);
+    else drawInk();
+    status(); updUR();
+    return ps;
+  }
+  function cnt(pages, idx) { return Object.values(pages).reduce((s, v) => s + v[idx].length, 0); }
+  function redo() {
+    if (!st.doc) return;
+    const top = st.redo[st.redo.length - 1];
+    if (!top || !st.file || top.file !== st.file.id) { flash('Không có gì để làm lại.'); return; }
+    st.redo.pop();
+    st.undo.push(top);
+    const ps = stepTo(top, 1);
+    if (top.kind === 'clear') {
+      const n = cnt(top.pages, 0);
+      log(`Làm lại xóa nét: xóa ${n} nét (${ps.length === 1 ? `trang ${ps[0]}` : `${ps.length} trang`}) của ${st.file.name}.`);
+      flash(`Đã xóa lại ${n} nét.`, 3000);
+    }
+  }
   function segDist(p, a, b) {
     const dx = b[0] - a[0], dy = b[1] - a[1];
     const L = dx * dx + dy * dy;
@@ -807,25 +856,25 @@
     });
     if (keep.length !== list.length) { saveInkPage(keep); drawInk(); }
   }
-  // Hoàn tác: lần xóa nét (trang / cả PDF) gần nhất thì khôi phục đủ các nét đã xóa; không thì bỏ nét cuối của trang đang xem (như cũ).
+  // Hoàn tác (m6-3): lùi đúng bước gần nhất (vẽ / tẩy / Xóa nét…), kể cả ở trang khác (nhảy về trang đó).
+  // Lịch sử trống (vd vừa mở lại PDF) thì như cũ: bỏ nét cuối của trang đang xem (bước này cũng Làm lại được).
   function undo() {
+    if (!st.doc) return;
     const top = st.undo[st.undo.length - 1];
-    if (top && top.kind === 'clear' && st.file && top.file === st.file.id) {
+    if (top && st.file && top.file === st.file.id) {
       st.undo.pop();
-      const a = inkAll();
-      const all = (a[top.file] = a[top.file] || {});
-      let n = 0;
-      for (const [p, list] of Object.entries(top.saved)) { all[p] = list.concat(all[p] || []); n += list.length; }
-      saveJSON(INK_KEY, a);
-      st.inkKB = Math.round((localStorage.getItem(INK_KEY) || '').length / 1024 * 10) / 10;
-      drawInk(); status();
-      const np = Object.keys(top.saved).length;
-      log(`Hoàn tác xóa nét: khôi phục ${n} nét (${np === 1 ? `trang ${Object.keys(top.saved)[0]}` : `${np} trang`}) của ${st.file.name}.`);
-      flash(`Đã khôi phục ${n} nét.`, 3000);
+      st.redo.push(top);
+      const ps = stepTo(top, 0);
+      if (top.kind === 'clear') {
+        const n = cnt(top.pages, 0);
+        log(`Hoàn tác xóa nét: khôi phục ${n} nét (${ps.length === 1 ? `trang ${ps[0]}` : `${ps.length} trang`}) của ${st.file.name}.`);
+        flash(`Đã khôi phục ${n} nét.`, 3000);
+      }
       return;
     }
-    if (top && top.kind === 'stroke') st.undo.pop();
-    const list = inkPage(); if (!list.length) { flash('Trang này chưa có nét nào.'); return; } list.pop(); saveInkPage(list); drawInk();
+    const list = inkPage(); if (!list.length) { flash('Trang này chưa có nét nào.'); return; }
+    const before = list.slice(); list.pop(); saveInkPage(list); drawInk();
+    st.redo.push({ kind: 'stroke', file: st.file.id, pages: { [st.page]: [list, before] } }); updUR();
   }
   // m6-2: "Xóa nét…": chọn trang này hoặc cả PDF đang mở, hộp hỏi ghi số nét; Hoàn tác khôi phục. Đồng bộ: trang bị xóa nét
   // để lại dấu đã xóa (sync.js) nên máy kia cũng mất nét và nét không "sống lại".
@@ -861,7 +910,9 @@
     if (Object.keys(all).length) a[st.file.id] = all; else delete a[st.file.id];
     saveJSON(INK_KEY, a);
     st.inkKB = Math.round((localStorage.getItem(INK_KEY) || '').length / 1024 * 10) / 10;
-    pushUndo({ kind: 'clear', file: st.file.id, saved });
+    const pagesH = {};
+    for (const [p, list] of Object.entries(saved)) pagesH[p] = [list, []];
+    pushUndo({ kind: 'clear', file: st.file.id, pages: pagesH });
     drawInk(); status();
     log(`Xóa nét: ${what}.`);
     flash(`Đã xóa ${n} nét. Bấm "Hoàn tác" để lấy lại.`, 4000);
@@ -1001,6 +1052,7 @@
     if (v === 'zoomin') zoomStep(+1);
     if (v === 'zoomout') zoomStep(-1);
     if (v === 'undo') undo();
+    if (v === 'redo') redo();
     if (v === 'clearink') clearInkAsk();
     // m4-1 (việc tồn 2): mở khung thì cuộn về đầu, để dòng chọn phần và nút "Đánh dấu" luôn thấy ngay.
     if (v === 'marks' && st.mode !== 'exam') { const p = $('v-marks'); p.hidden = !p.hidden; if (!p.hidden) { renderMarks(); p.scrollTop = 0; } }
@@ -1063,7 +1115,9 @@
     if (!f) { ss.innerHTML = ''; $('ex-exam').disabled = true; if ($('ex-practice')) $('ex-practice').disabled = true; $('ex-hint').textContent = ''; return; }
     const c = pcfg(f.id);
     const keys = S.KEYS.filter((k) => S.isTestKey(k) && c.marks[k] != null);
+    const prevSeg = ss.value;
     ss.innerHTML = keys.map((k) => `<option value="${k}">${esc(S.LABEL[k])}</option>`).join('');
+    if (prevSeg && keys.includes(prevSeg)) ss.value = prevSeg;   // m6-3: vẽ lại thẻ Đề (vd dữ liệu vừa đồng bộ về) không làm mất phần đang chọn
     $('ex-exam').disabled = !keys.length || !signedIn || f.scope === 'key';
     if ($('ex-practice')) $('ex-practice').disabled = $('ex-exam').disabled;
     $('ex-hint').innerHTML = f.scope === 'key' ? 'File key chỉ mở ở chế độ ôn tập.' : marksSummary(c.marks, !keys.length);
